@@ -20,6 +20,8 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+import BRAM              :: *;
+import ClientServer      :: *;
 import Vector            :: *;
 import GetPut            :: *;
 import Connectable       :: *;
@@ -53,6 +55,10 @@ interface PcieTop#(type ipins);
    interface ipins       pins;
 endinterface
 
+typedef enum {
+   Idle, AddrHi, AddrLo, MsgData
+   } MsixInterruptState deriving (Bits, Eq);
+
 (* no_default_clock, no_default_reset *)
 module [Module] mkPcieTopFromPortal #(Clock pci_sys_clk_p, Clock pci_sys_clk_n,
 				      Clock sys_clk_p,     Clock sys_clk_n,
@@ -66,6 +72,9 @@ module [Module] mkPcieTopFromPortal #(Clock pci_sys_clk_p, Clock pci_sys_clk_n,
 	     Add#(e__, TMul#(32, TDiv#(dsz, 32)), 256),
 	     Add#(f__, TDiv#(dsz, 32), 8),
 	     Mul#(TDiv#(dsz, 8), 8, dsz)
+	     Add#(g__, TMul#(8, TDiv#(dsz, 32)), 32),
+	     Add#(h__, dsz, 128),
+	     Add#(i__, TDiv#(dsz, 32), 4)
       );
 
    let contentId = 0;
@@ -90,15 +99,48 @@ module [Module] mkPcieTopFromPortal #(Clock pci_sys_clk_p, Clock pci_sys_clk_n,
    mkConnection(axiMasterEngine.master, ctrl, clocked_by x7pcie.clock125, reset_by x7pcie.reset125);
 
    // going from level to edge-triggered interrupt
+   Reg#(MsixInterruptState) msixInterruptState <- mkReg(Idle, clocked_by x7pcie.clock125, reset_by x7pcie.reset125);
+   Reg#(Bit#(32)) addrHiReg <- mkReg(0, clocked_by x7pcie.clock125, reset_by x7pcie.reset125);
+   Reg#(Bit#(32)) addrLoReg <- mkReg(0, clocked_by x7pcie.clock125, reset_by x7pcie.reset125);
    Vector#(15, Reg#(Bool)) interruptRequested <- replicateM(mkReg(False, clocked_by x7pcie.clock125, reset_by x7pcie.reset125));
    for (Integer i = 0; i < 15; i = i + 1) begin
-      // intr_num 0 for the directory
-      Integer intr_num = i+1;
-      MSIX_Entry msixEntry = x7pcie.msixEntry[intr_num];
-      rule interruptRequest;
-	 if (portalTop.interrupt[i] && !interruptRequested[i])
-	    axiMasterEngine.interruptRequest.put(tuple2({msixEntry.addr_hi, msixEntry.addr_lo}, msixEntry.msg_data));
-	 interruptRequested[i] <= portalTop.interrupt[i];
+      Bit#(4) interruptNumber = fromInteger(i);
+      rule msixRequest;
+	 if (portalTop.interrupt[i] && !interruptRequested[i] && msixInterruptState == Idle) begin
+	    Bit#(4) interruptNumber = fromInteger(i);
+	    x7pcie.msixBram.request.put(BRAMRequest { write: False, responseOnWrite: False, address: { interruptNumber, 2'b00 }, datain: ?});
+	    msixInterruptState <= AddrHi;
+	 end
+      endrule
+      rule interruptRequest if (msixInterruptState != Idle);
+	 Bit#(32) msixEntry <- x7pcie.msixBram.response.get();
+	 Bit#(32) addrHi = addrHiReg;
+	 Bit#(32) addrLo = addrLoReg;
+	 Maybe#(Bit#(6)) offset = tagged Invalid;
+	 MsixInterruptState nextState = Idle;
+	 case (msixInterruptState)
+	    AddrHi: begin
+		       addrHiReg <= msixEntry;
+		       addrHi = msixEntry;
+		       offset = tagged Valid ({ interruptNumber, 2'b01});
+		       nextState = AddrLo;
+		    end
+	    AddrLo: begin
+		       addrLoReg <= msixEntry;
+		       addrLo = msixEntry;
+		       offset = tagged Valid ({ interruptNumber, 2'b10});
+		       nextState = MsgData;
+		    end
+	    MsgData: begin
+			let msgData = msixEntry;
+			axiMasterEngine.interruptRequest.put(tuple2({addrHi, addrLo}, msgData));
+			interruptRequested[interruptNumber] <= portalTop.interrupt[interruptNumber];
+			nextState = Idle;
+		     end
+	 endcase
+	 if (offset matches tagged Valid .o)
+	       x7pcie.msixBram.request.put(BRAMRequest { write: False, responseOnWrite: False, address: o, datain: ?});
+	 msixInterruptState <= nextState;
       endrule
    end
 
