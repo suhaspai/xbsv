@@ -33,14 +33,14 @@ import PCIE              ::*;
 typedef struct {
    Bit#(22)      user;
    Bool          last;
-   Bit#(8)       keep;
-   Bit#(64)      data;
+   Bit#(16)       keep;
+   Bit#(128)      data;
 } AxiRx deriving (Bits, Eq);
 
 typedef struct {
    Bool          last;
-   Bit#(8)       keep;
-   Bit#(64)      data;
+   Bit#(16)       keep;
+   Bit#(128)      data;
 } AxiTx deriving (Bits, Eq);		
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -76,8 +76,8 @@ endinterface
 (* always_ready, always_enabled *)
 interface PCIE_AXI_TX_X7;
    method    Action           tlast(Bool i);
-   method    Action           tdata(Bit#(64) i);
-   method    Action           tkeep(Bit#(8) i);
+   method    Action           tdata(Bit#(128) i);
+   method    Action           tkeep(Bit#(16) i);
    method    Action           tvalid(Bool i);
    method    Bool             tready();
    method    Action           tuser(Bit#(4) i);
@@ -90,8 +90,8 @@ endinterface
 (* always_ready, always_enabled *)
 interface PCIE_AXI_RX_X7;
    method    Bool             rlast();
-   method    Bit#(64)         rdata();
-   method    Bit#(8)          rkeep();
+   method    Bit#(128)        rdata();
+   method    Bit#(16)         rkeep();
    method    Bit#(22)         ruser();
    method    Bool             rvalid();
    method    Action           rready(Bool i);
@@ -435,7 +435,7 @@ interface PCIE_TRN_COMMON_X7;
 endinterface
     
 interface PCIE_TRN_XMIT_X7;
-   method    Action      xmit(TLPData#(8) data);
+   method    Action      xmit(TLPData#(16) data);
    method    Action      discontinue(Bool i);
    method    Action      ecrc_generate(Bool i);
    method    Action      error_forward(Bool i);
@@ -447,7 +447,7 @@ interface PCIE_TRN_XMIT_X7;
 endinterface
 
 interface PCIE_TRN_RECV_X7;
-   method    ActionValue#(Tuple3#(Bool, Bool, TLPData#(8))) recv();
+   method    ActionValue#(Tuple3#(Bool, Bool, TLPData#(16))) recv();
    method    Action      non_posted_ok(Bool i);
    method    Action      non_posted_req(Bool i);
 endinterface
@@ -513,8 +513,8 @@ module mkPCIExpressEndpointX7#(PCIEParams params)(PCIExpressX7#(lanes))
 
    Wire#(Bool)                               wAxiTxValid         <- mkDWire(False, clocked_by user_clk, reset_by noReset);
    Wire#(Bool)                               wAxiTxLast          <- mkDWire(False, clocked_by user_clk, reset_by noReset);
-   Wire#(Bit#(64))                           wAxiTxData          <- mkDWire(0, clocked_by user_clk, reset_by noReset);
-   Wire#(Bit#(8))                            wAxiTxKeep          <- mkDWire(0, clocked_by user_clk, reset_by noReset);
+   Wire#(Bit#(128))                          wAxiTxData          <- mkDWire(0, clocked_by user_clk, reset_by noReset);
+   Wire#(Bit#(16))                           wAxiTxKeep          <- mkDWire(0, clocked_by user_clk, reset_by noReset);
    FIFO#(AxiTx)                              fAxiTx              <- mkBypassFIFO(clocked_by user_clk, reset_by noReset);
    
    FIFOF#(AxiRx)                             fAxiRx              <- mkBypassFIFOF(clocked_by user_clk, reset_by noReset);
@@ -585,7 +585,7 @@ module mkPCIExpressEndpointX7#(PCIEParams params)(PCIExpressX7#(lanes))
       
    interface PCIE_TRN_XMIT_X7 trn_tx;
       method Action xmit(data);
-	 fAxiTx.enq(AxiTx { last: data.eof, keep: dwordSwap64BE(data.be), data: dwordSwap64(data.data) });
+	 fAxiTx.enq(AxiTx { last: data.eof, keep: dwordSwap128BE(data.be), data: dwordSwap128(data.data) });
       endmethod
       method discontinue(i)                    = wDiscontinue._write(pack(i));
       method ecrc_generate(i)          	       = wEcrcGen._write(pack(i));
@@ -598,14 +598,14 @@ module mkPCIExpressEndpointX7#(PCIEParams params)(PCIExpressX7#(lanes))
    endinterface
       
    interface PCIE_TRN_RECV_X7 trn_rx;
-      method ActionValue#(Tuple3#(Bool, Bool, TLPData#(8))) recv();
+      method ActionValue#(Tuple3#(Bool, Bool, TLPData#(16))) recv();
 	 let info <- toGet(fAxiRx).get;
-	 TLPData#(8) retval = defaultValue;
+	 TLPData#(16) retval = defaultValue;
 	 retval.sof  = (info.user[14] == 1);
 	 retval.eof  = info.last;
 	 retval.hit  = info.user[8:2];
-	 retval.be   = dwordSwap64BE(info.keep);
-	 retval.data = dwordSwap64(info.data);
+	 retval.be   = dwordSwap128BE(info.keep);
+	 retval.data = dwordSwap128(info.data);
 	 return tuple3(info.user[1] == 1, info.user[0] == 1, retval);
       endmethod
       method non_posted_ok(i)  = pcie_ep.axi_rx.rnp_ok(i);
@@ -623,8 +623,8 @@ endmodule: mkPCIExpressEndpointX7
 ////////////////////////////////////////////////////////////////////////////////
 
 // Basic TLPData#(8) connections to PCIE endpoint
-instance Connectable#(Get#(TLPData#(8)), PCIE_TRN_XMIT_X7);
-   module mkConnection#(Get#(TLPData#(8)) g, PCIE_TRN_XMIT_X7 p)(Empty);
+instance Connectable#(Get#(TLPData#(16)), PCIE_TRN_XMIT_X7);
+   module mkConnection#(Get#(TLPData#(16)) g, PCIE_TRN_XMIT_X7 p)(Empty);
       rule every;
          p.cut_through_mode(False);
          p.configuration_completion_grant(True);  // Core gets to choose
@@ -639,59 +639,59 @@ instance Connectable#(Get#(TLPData#(8)), PCIE_TRN_XMIT_X7);
    endmodule
 endinstance
 
-instance Connectable#(PCIE_TRN_XMIT_X7, Get#(TLPData#(8)));
-   module mkConnection#(PCIE_TRN_XMIT_X7 p, Get#(TLPData#(8)) g)(Empty);
-      mkConnection(g, p);
-   endmodule
-endinstance
+// instance Connectable#(PCIE_TRN_XMIT_X7, Get#(TLPData#(8)));
+//    module mkConnection#(PCIE_TRN_XMIT_X7 p, Get#(TLPData#(8)) g)(Empty);
+//       mkConnection(g, p);
+//    endmodule
+// endinstance
 
-instance Connectable#(Put#(TLPData#(8)), PCIE_TRN_RECV_X7);
-   module mkConnection#(Put#(TLPData#(8)) p, PCIE_TRN_RECV_X7 r)(Empty);
-      (* no_implicit_conditions, fire_when_enabled *)
-      rule every;
-         r.non_posted_ok(True);
-	 r.non_posted_req(True);
-      endrule
-      rule connect;
-         let data <- r.recv;
-         p.put(tpl_3(data));
-      endrule
-   endmodule
-endinstance
+// instance Connectable#(Put#(TLPData#(8)), PCIE_TRN_RECV_X7);
+//    module mkConnection#(Put#(TLPData#(8)) p, PCIE_TRN_RECV_X7 r)(Empty);
+//       (* no_implicit_conditions, fire_when_enabled *)
+//       rule every;
+//          r.non_posted_ok(True);
+// 	 r.non_posted_req(True);
+//       endrule
+//       rule connect;
+//          let data <- r.recv;
+//          p.put(tpl_3(data));
+//       endrule
+//    endmodule
+// endinstance
 
-instance Connectable#(PCIE_TRN_RECV_X7, Put#(TLPData#(8)));
-   module mkConnection#(PCIE_TRN_RECV_X7 r, Put#(TLPData#(8)) p)(Empty);
-      mkConnection(p, r);
-   endmodule
-endinstance
+// instance Connectable#(PCIE_TRN_RECV_X7, Put#(TLPData#(8)));
+//    module mkConnection#(PCIE_TRN_RECV_X7 r, Put#(TLPData#(8)) p)(Empty);
+//       mkConnection(p, r);
+//    endmodule
+// endinstance
 
 // Connections between TLPData#(16) and a PCIE endpoint.
 // These are all using the same clock, so the TLPData#(16) accesses
 // will not be back-to-back.
 
-instance Connectable#(Get#(TLPData#(16)), PCIE_TRN_XMIT_X7);
-   module mkConnection#(Get#(TLPData#(16)) g, PCIE_TRN_XMIT_X7 t)(Empty);
-      FIFO#(TLPData#(8)) outFifo <- mkFIFO();
+// instance Connectable#(Get#(TLPData#(16)), PCIE_TRN_XMIT_X7);
+//    module mkConnection#(Get#(TLPData#(16)) g, PCIE_TRN_XMIT_X7 t)(Empty);
+//       FIFO#(TLPData#(16)) outFifo <- mkFIFO();
 
-      (* no_implicit_conditions, fire_when_enabled *)
-      rule every;
-         t.cut_through_mode(False);
-         t.configuration_completion_grant(True);  // True means core gets to choose
-         t.error_forward(False);
-	 t.ecrc_generate(False);
-	 t.discontinue(False);
-      endrule
+//       (* no_implicit_conditions, fire_when_enabled *)
+//       rule every;
+//          t.cut_through_mode(False);
+//          t.configuration_completion_grant(True);  // True means core gets to choose
+//          t.error_forward(False);
+// 	 t.ecrc_generate(False);
+// 	 t.discontinue(False);
+//       endrule
 
-      rule connect;
-         let data = outFifo.first; outFifo.deq;
-         if (data.be != 0)
-            t.xmit(data);
-      endrule
+//       rule connect;
+//          let data = outFifo.first; outFifo.deq;
+//          if (data.be != 0)
+//             t.xmit(data);
+//       endrule
 
-      Put#(TLPData#(8)) p = fifoToPut(outFifo);
-      mkConnection(g,p);
-   endmodule
-endinstance
+//       Put#(TLPData#(16)) p = fifoToPut(outFifo);
+//       mkConnection(g,p);
+//    endmodule
+// endinstance
 
 instance Connectable#(PCIE_TRN_XMIT_X7, Get#(TLPData#(16)));
    module mkConnection#(PCIE_TRN_XMIT_X7 p, Get#(TLPData#(16)) g)(Empty);
@@ -701,7 +701,7 @@ endinstance
 
 instance Connectable#(Put#(TLPData#(16)), PCIE_TRN_RECV_X7);
    module mkConnection#(Put#(TLPData#(16)) p, PCIE_TRN_RECV_X7 r)(Empty);
-      FIFO#(TLPData#(8)) inFifo <- mkFIFO();
+      FIFO#(TLPData#(16)) inFifo <- mkFIFO();
 
       (* no_implicit_conditions, fire_when_enabled *)
       rule every;
@@ -714,7 +714,7 @@ instance Connectable#(Put#(TLPData#(16)), PCIE_TRN_RECV_X7);
          inFifo.enq(tpl_3(data));
       endrule
 
-      Get#(TLPData#(8)) g = fifoToGet(inFifo);
+      Get#(TLPData#(16)) g = fifoToGet(inFifo);
       mkConnection(g,p);
    endmodule
 endinstance
@@ -736,8 +736,9 @@ instance ConnectableWithClocks#(PCIE_TRN_XMIT_X7, Get#(TLPData#(16)));
       ////////////////////////////////////////////////////////////////////////////////
       /// Design Elements
       ////////////////////////////////////////////////////////////////////////////////
-      FIFO#(TLPData#(8))                     outFifo             <- mkFIFO(clocked_by fastClock, reset_by fastReset);
-      Gearbox#(2, 1, TLPData#(8))            fifoTxData          <- mkNto1Gearbox(slowClock, slowReset, fastClock, fastReset);
+      FIFO#(TLPData#(16))                    outFifo             <- mkFIFO(clocked_by fastClock, reset_by fastReset);
+      // Gearbox#(2, 1, TLPData#(8))            fifoTxData          <- mkNto1Gearbox(slowClock, slowReset, fastClock, fastReset);
+      FIFO#(TLPData#(16))                    fifoTxData          <- mkFIFO(clocked_by fastClock, reset_by fastReset);
 
       ////////////////////////////////////////////////////////////////////////////////
       /// Rules
@@ -768,12 +769,12 @@ instance ConnectableWithClocks#(PCIE_TRN_XMIT_X7, Get#(TLPData#(16)));
          endfunction
 
          let data <- g.get;
-         fifoTxData.enq(split(data));
+         fifoTxData.enq(data);
       endrule
 
       rule process_outgoing_packets;
          let data = fifoTxData.first; fifoTxData.deq;
-         outFifo.enq(head(data));
+         outFifo.enq(data);
       endrule
 
       rule send_data;
@@ -803,8 +804,8 @@ instance ConnectableWithClocks#(Put#(TLPData#(16)), PCIE_TRN_RECV_X7);
       ////////////////////////////////////////////////////////////////////////////////
       /// Design Elements
       ////////////////////////////////////////////////////////////////////////////////
-      FIFO#(TLPData#(8))                        inFifo              <- mkFIFO(clocked_by fastClock, reset_by fastReset);
-      Gearbox#(1, 2, TLPData#(8))               fifoRxData          <- mk1toNGearbox(fastClock, fastReset, slowClock, slowReset);
+      FIFO#(TLPData#(16))                        inFifo              <- mkFIFO(clocked_by fastClock, reset_by fastReset);
+      Gearbox#(1, 1, TLPData#(16))               fifoRxData          <- mk1toNGearbox(fastClock, fastReset, slowClock, slowReset);
 
       Reg#(Bool)                                rOddBeat            <- mkRegA(False, clocked_by fastClock, reset_by fastReset);
       Reg#(Bool)                                rSendInvalid        <- mkRegA(False, clocked_by fastClock, reset_by fastReset);
@@ -827,7 +828,7 @@ instance ConnectableWithClocks#(Put#(TLPData#(16)), PCIE_TRN_RECV_X7);
          let data = inFifo.first; inFifo.deq;
          rOddBeat     <= !rOddBeat;
          rSendInvalid <= !rOddBeat && data.eof;
-         Vector#(1, TLPData#(8)) v = defaultValue;
+         Vector#(1, TLPData#(16)) v = defaultValue;
          v[0] = data;
          fifoRxData.enq(v);
       endrule
@@ -835,7 +836,7 @@ instance ConnectableWithClocks#(Put#(TLPData#(16)), PCIE_TRN_RECV_X7);
       rule send_invalid_packets(rSendInvalid);
          rOddBeat     <= !rOddBeat;
          rSendInvalid <= False;
-         Vector#(1, TLPData#(8)) v = defaultValue;
+         Vector#(1, TLPData#(16)) v = defaultValue;
          v[0].eof = True;
          v[0].be  = 0;
          fifoRxData.enq(v);
@@ -853,7 +854,7 @@ instance ConnectableWithClocks#(Put#(TLPData#(16)), PCIE_TRN_RECV_X7);
          endfunction
 
          fifoRxData.deq;
-         p.put(combine(fifoRxData.first));
+         p.put(fifoRxData.first[0]);
       endrule
 
    endmodule
