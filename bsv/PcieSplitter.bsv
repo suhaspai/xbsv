@@ -49,7 +49,7 @@ interface PcieSplitter#(numeric type bpb);
 
    interface Put#(TimestampedTlpData) trace;
 
-   interface Vector#(16,MSIX_Entry) msixEntry;
+   interface BRAMServer#(Bit#(6), Bit#(32)) msixBram;
 
 endinterface: PcieSplitter
 
@@ -335,9 +335,7 @@ module mkPcieSplitter#( Bit#(64)  board_content_id
 								, my_id
 								, max_read_req_bytes
 								, max_payload_bytes
-								, dispatcher.tlp_portal_drop_count
-								, dispatcher.tlp_axi_drop_count
-								, portalResetIfc
+								//, portalResetIfc
 								);
    AxiMasterEngine axiMasterEngine <- mkAxiMasterEngine(my_id);
    mkConnection(axiMasterEngine.master, csr.slave);
@@ -430,7 +428,7 @@ module mkPcieSplitter#( Bit#(64)  board_content_id
        endmethod
    endinterface: trace
    
-   interface Vector msixEntry = csr.msixEntry;
+   interface BRAMServer msixBram = csr.msixBram;
       
 endmodule: mkPcieSplitter
 
