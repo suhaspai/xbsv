@@ -7,6 +7,7 @@
 // PCI-Express for Xilinx 7
 // FPGAs.
 
+import BRAM            :: *;
 import Vector          :: *;
 import GetPut          :: *;
 import PCIE            :: *;
@@ -41,7 +42,7 @@ interface X7PcieSplitter#(numeric type lanes);
    interface Put#(TimestampedTlpData) trace;
    interface Reset portalReset;
    interface ReadOnly#(PciId) pciId;
-   interface Vector#(16, MSIX_Entry) msixEntry;
+   interface BRAMServer#(Bit#(6), Bit#(32)) msixBram;
 endinterface
 
 // This module builds the transactor hierarchy, the clock
@@ -127,17 +128,17 @@ module mkX7PcieSplitter#( Clock pci_sys_clk_p, Clock pci_sys_clk_n
    Bool      msix_enable_250              = (_ep.cfg_interrupt.msixenable() == 1);
    Bool      msix_masked_250              = (_ep.cfg_interrupt.msixfm()     == 1);
 
-   CrossingReg#(UInt#(13)) max_rd_req_cr  <- mkNullCrossingReg(epClock125, 128,   clocked_by epClock250, reset_by epReset250);
-   CrossingReg#(UInt#(13)) max_payload_cr <- mkNullCrossingReg(epClock125, 128,   clocked_by epClock250, reset_by epReset250);
-   CrossingReg#(UInt#(8))  rcb_cr         <- mkNullCrossingReg(epClock125, 128,   clocked_by epClock250, reset_by epReset250);
-   CrossingReg#(Bool)      msix_enable_cr <- mkNullCrossingReg(epClock125, False, clocked_by epClock250, reset_by epReset250);
-   CrossingReg#(Bool)      msix_masked_cr <- mkNullCrossingReg(epClock125, True,  clocked_by epClock250, reset_by epReset250);
+   CrossingReg#(UInt#(13)) max_rd_req_cr  <- mkNullCrossingReg(epClock250, 128,   clocked_by epClock250, reset_by epReset250);
+   CrossingReg#(UInt#(13)) max_payload_cr <- mkNullCrossingReg(epClock250, 128,   clocked_by epClock250, reset_by epReset250);
+   CrossingReg#(UInt#(8))  rcb_cr         <- mkNullCrossingReg(epClock250, 128,   clocked_by epClock250, reset_by epReset250);
+   CrossingReg#(Bool)      msix_enable_cr <- mkNullCrossingReg(epClock250, False, clocked_by epClock250, reset_by epReset250);
+   CrossingReg#(Bool)      msix_masked_cr <- mkNullCrossingReg(epClock250, True,  clocked_by epClock250, reset_by epReset250);
 
-   Reg#(UInt#(13)) max_read_req_bytes <- mkReg(128,   clocked_by epClock125, reset_by epReset125);
-   Reg#(UInt#(13)) max_payload_bytes  <- mkReg(128,   clocked_by epClock125, reset_by epReset125);
-   Reg#(Bit#(7))   rcb_mask           <- mkReg(7'h3f, clocked_by epClock125, reset_by epReset125);
-   Reg#(Bool)      msix_enable        <- mkReg(False, clocked_by epClock125, reset_by epReset125);
-   Reg#(Bool)      msix_masked        <- mkReg(True,  clocked_by epClock125, reset_by epReset125);
+   Reg#(UInt#(13)) max_read_req_bytes <- mkReg(128,   clocked_by epClock250, reset_by epReset250);
+   Reg#(UInt#(13)) max_payload_bytes  <- mkReg(128,   clocked_by epClock250, reset_by epReset250);
+   Reg#(Bit#(7))   rcb_mask           <- mkReg(7'h3f, clocked_by epClock250, reset_by epReset250);
+   Reg#(Bool)      msix_enable        <- mkReg(False, clocked_by epClock250, reset_by epReset250);
+   Reg#(Bool)      msix_masked        <- mkReg(True,  clocked_by epClock250, reset_by epReset250);
 
    (* fire_when_enabled, no_implicit_conditions *)
    rule cross_config_values;
@@ -175,10 +176,10 @@ module mkX7PcieSplitter#( Clock pci_sys_clk_p, Clock pci_sys_clk_n
 						, msix_enable
 						, msix_masked
 						, False // no MSI, only MSI-X
-						, clocked_by epClock125, reset_by epReset125
+						, clocked_by epClock250, reset_by epReset250
 						);
-   mkConnectionWithClocks(_ep.trn_rx, tpl_2(bridge.tlps), epClock250, epReset250, epClock125, epReset125);
-   mkConnectionWithClocks(_ep.trn_tx, tpl_1(bridge.tlps), epClock250, epReset250, epClock125, epReset125);
+   mkConnectionWithClocks(_ep.trn_rx, tpl_2(bridge.tlps), epClock250, epReset250, epClock250, epReset250);
+   mkConnectionWithClocks(_ep.trn_tx, tpl_1(bridge.tlps), epClock250, epReset250, epClock250, epReset250);
 
    //SyncFIFOIfc#(MemoryRequest#(32,256)) fMemReq <- mkSyncFIFO(1, clk, rst_n, ddr3clk);
    //SyncFIFOIfc#(MemoryResponse#(256))   fMemResp <- mkSyncFIFO(1, ddr3clk, ddr3rstn, clk);
@@ -190,12 +191,14 @@ module mkX7PcieSplitter#( Clock pci_sys_clk_p, Clock pci_sys_clk_n
 			 
    //mkConnection( memclient, ddr3_ctrl.user, clocked_by ddr3clk, reset_by ddr3rstn );
 
+   Reset portalResetBUFG <- mkResetBUFG(clocked_by epClock250, reset_by bridge.portalReset);
+
    interface pcie     = _ep.pcie;
    //interface ddr3     = ddr3_ctrl.ddr3;
    interface master   = bridge.master;
    interface slave    = bridge.slave;
    interface trace    = bridge.trace;
-   interface portalReset = bridge.portalReset;
+   interface portalReset = portalResetBUFG;
    interface ReadOnly pciId;
       method PciId _read();
          return my_id;
@@ -203,13 +206,13 @@ module mkX7PcieSplitter#( Clock pci_sys_clk_p, Clock pci_sys_clk_n
    endinterface
    interface clock250 = epClock250;
    interface reset250 = epReset250;
-   interface clock125 = epClock125;
-   interface reset125 = epReset125;
+   interface clock125 = epClock250;
+   interface reset125 = epReset250;
    interface clock200 = sys_clk_200mhz_buf;
    interface reset200 = sys_clk_200mhz_reset;
 
    method Bool isLinkUp        = link_is_up;
 //   method Bool isCalibrated  = ddr3_ctrl.user.init_done;
-   interface Vector msixEntry = bridge.msixEntry;
+   interface BRAMServer msixBram = bridge.msixBram;
    
 endmodule: mkX7PcieSplitter
