@@ -128,10 +128,7 @@ module mkPcieTestBenchRequest#(PcieTestBenchIndication indication)(PcieTestBench
    AxiControlAndStatusRegs axiCsr  <- mkAxiControlAndStatusRegs( board_content_id,
 								my_id,
 								0,
-								0,
-								tlp_portal_drop_count,
-								tlp_axi_drop_count,
-								portalResetIfc);
+								0);
    Reg#(Bit#(32)) timestamp <- mkReg(0);
    rule timebase;
       timestamp <= timestamp + 1;
