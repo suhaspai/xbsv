@@ -56,10 +56,21 @@ module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
     Reg#(TLPTag) tlpTag <- mkReg(0);
     Reg#(Bit#(12)) bTagReg <- mkReg(0);
 
-    MIMOConfiguration mimoCfg = defaultValue;
-    MIMO#(1,4,16,Bit#(32)) completionMimo <- mkMIMO(mimoCfg);
-   Reg#(TLPLength) readBurstCount <- mkReg(0);
-   rule completionHeader if (readBurstCount == 0 && readDataFifo.notEmpty() && completionMimo.deqReadyN(1) &&& interruptSecondHalf matches tagged Invalid);
+   MIMOConfiguration mimoCfg              = defaultValue;
+   MIMO#(1,4,16,Bit#(32)) completionMimo  <- mkMIMO(mimoCfg);
+   Reg#(TLPLength) readBurstCount         <- mkReg(0);
+   Reg#(UInt#(3))  readDeqCount           <- mkReg(0);
+   Reg#(Bool) completionHeaderReady       <- mkReg(False);
+   Reg#(Bool) readLastReg                 <- mkReg(False);
+   Reg#(Bool) readBurstGreaterThan4       <- mkReg(False);
+   Reg#(Bool) readDeqReadyN               <- mkReg(False);
+   rule completionHeaderCheck if (!completionHeaderReady && readDataFifo.notEmpty() && completionMimo.deqReadyN(1) &&& interruptSecondHalf matches tagged Invalid);
+      let hdr = readDataFifo.first;
+      TLPLength rbc = hdr.length;
+      completionHeaderReady <= True;
+      readLastReg <= (rbc == 1);
+   endrule
+   rule completionHeader if (completionHeaderReady);
       let hdr = readDataFifo.first;
       TLPLength rbc = hdr.length;
 
@@ -88,9 +99,14 @@ module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
       tlp.hit = hitReg;
       tlpOutFifo.enq(tlp);
 
+      readLastReg <= (rbc == 1);
       rbc = rbc - 1;
       readBurstCount <= rbc;
-      if (rbc == 0) begin
+      readBurstGreaterThan4 <= (rbc > 4);
+      UInt#(3) nextDeqCount = (rbc > 4) ? 4 : truncate(unpack(rbc));
+      readDeqCount <= nextDeqCount;
+      readDeqReadyN <= completionMimo.deqReadyN(nextDeqCount);
+      if (readLastReg) begin
 	 readDataFifo.deq;
       end
    endrule
@@ -112,34 +128,28 @@ module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
       let rbc = readBurstCount;
       let sendit = False;
       TLPData#(16) tlp = defaultValue;
-      Vector#(4, Bit#(32)) dvec = unpack(0);
       tlp.sof = False;
       //$display("continuation rbc=%d", rbc);
-      if (rbc > 4) begin
-	 if (completionMimo.deqReadyN(4)) begin
-	    rbc = rbc - 4;
-	    dvec = completionMimo.first();
-	    completionMimo.deq(4);
-	    tlp.be = tlpBe(4);
-	    tlp.eof = False;
-	    sendit = True;
-	 end
-      end
-      else begin
-	 UInt#(3) deqCount = truncate(unpack(rbc));
-	 if (completionMimo.deqReadyN(deqCount)) begin
-	    dvec = completionMimo.first();
-	    completionMimo.deq(deqCount);
-	    tlp.be = tlpBe(rbc);
-	    //$display("tlp.data=%h tlp.be=%h", tlp.data, tlp.be);
-	    tlp.eof = True;
-	    rbc = 0;
-	    sendit = True;
-	 end
+      UInt#(3) deqCount = readDeqCount;
+
+      Vector#(4, Bit#(32)) dvec = completionMimo.first();
+      tlp.be = tlpBe(rbc);
+      //$display("tlp.data=%h tlp.be=%h", tlp.data, tlp.be);
+      if (readBurstGreaterThan4)
+	 tlp.eof = True;
+
+      sendit = readDeqReadyN;
+      if (readDeqReadyN) begin
+	 completionMimo.deq(deqCount);
+	 rbc = rbc - extend(pack(deqCount));
       end
 
       readBurstCount <= rbc;
-      if (rbc == 0) begin
+      readBurstGreaterThan4 <= (rbc > 4);
+      UInt#(3) nextDeqCount = (rbc > 4) ? 4 : truncate(unpack(rbc));
+      readDeqCount <= nextDeqCount;
+      readDeqReadyN <= completionMimo.deqReadyN(nextDeqCount);
+      if (!readBurstGreaterThan4 && sendit) begin
 	 readDataFifo.deq();
       end
       if (sendit) begin
