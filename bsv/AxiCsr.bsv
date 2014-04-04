@@ -81,6 +81,12 @@ typedef struct {
    Bool isMsixAccess;
    Bit#(12) id;
    } ReadStage1Values deriving (Bits);
+typedef struct {
+   Bit#(13) waddr;
+   Bool last;
+   Bool isMsixAccess;
+   Bit#(12) id;
+   } WriteStage1Values deriving (Bits);
 
 // This module encapsulates all of the logic for instantiating and
 // accessing the control and status registers. It defines the
@@ -207,9 +213,9 @@ module mkAxiControlAndStatusRegs#( Bit#(64)  board_content_id
    endfunction: update_dword
 
    // Function to write to the CSR address space (using DW address)
-   function Action wr_csr(UInt#(30) addr, Bit#(4) be, Bit#(32) dword);
+   function Action wr_csr(UInt#(13) addr, Bit#(4) be, Bit#(32) dword);
       action
-         case (addr % 8192)
+         case (addr)
 	    775: tlpTracingReg <= (dword != 0) ? True : False;
 
 	    768: begin
@@ -246,6 +252,8 @@ module mkAxiControlAndStatusRegs#( Bit#(64)  board_content_id
    FIFOF#(ReadStage0Values) read_stage0_fifo <- mkFIFOF();
    FIFOF#(ReadStage1Values) read_stage1_fifo <- mkFIFOF();
    FIFOF#(Bit#(32)) v_fifo <- mkFIFOF();
+
+   FIFOF#(WriteStage1Values) write_stage1_fifo <- mkFIFOF();
 
    Reg#(Bool) readIdleReg <- mkReg(True);
    Reg#(Bool) readLastReg <- mkReg(False);
@@ -328,7 +336,7 @@ module mkAxiControlAndStatusRegs#( Bit#(64)  board_content_id
       Bit#(30) addr = writeAddr;
       let req = req_aw_fifo.first();
       let isIdle = writeIdleReg;
-      // fixme
+      // FIXME
       let nextIdle = nextLast;
       if (isIdle) begin
 	 nextWbc = extend(req.len);
@@ -336,24 +344,15 @@ module mkAxiControlAndStatusRegs#( Bit#(64)  board_content_id
 	 addr = truncate(req.address);
 	 nextIdle = False;
       end
-      else begin
-	  let resp_write = resp_write_fifo.first();
-	  resp_write_fifo.deq();
 
-	  Bit#(30) waddr = addr >> 2;
-	  if (waddr >= 4096 && waddr <= 4159) begin
-	     // msix register
-	     msix_bram.portA.request.put(BRAMRequest { write: True, responseOnWrite: False, address: waddr[5:0], datain: resp_write.data});
-	  end
-	  else begin
-	     wr_csr(unpack(addr >> 2), 'hf, resp_write.data);
-	  end
-	  addr = addr + 4;
-      end
+      Bit#(13) waddr = addr[14:2];
+      Bool isMsixAccess = (waddr >= 4096 && waddr <= 4159);
+      // FIXME?
+      write_stage1_fifo.enq(WriteStage1Values { last: nextLast, isMsixAccess: isMsixAccess , waddr: waddr, id: req.id});
 
       writeIdleReg <= nextIdle;
       writeBurstCount <= nextWbc;
-      writeAddr <= addr;
+      writeAddr <= addr + 4;
       writeLastReg <= nextLast;
       if (isLast) begin
 	 req_aw_fifo.deq();
@@ -361,6 +360,24 @@ module mkAxiControlAndStatusRegs#( Bit#(64)  board_content_id
       end
    endrule
 
+   rule do_write_stage1;
+      let values = write_stage1_fifo.first();
+      write_stage1_fifo.deq();
+
+      let resp_write = resp_write_fifo.first();
+      resp_write_fifo.deq();
+
+      Bit#(13) waddr = values.waddr;
+
+      if (values.isMsixAccess) begin
+	 // msix register
+	 msix_bram.portA.request.put(BRAMRequest { write: True, responseOnWrite: False, address: waddr[5:0], datain: resp_write.data});
+      end
+      else begin
+	 wr_csr(unpack(waddr), 'hf, resp_write.data);
+      end
+   endrule
+      
    interface Axi3Slave slave;
 	interface Put req_ar;
 	   method Action put(Axi3ReadRequest#(32,12) req);
