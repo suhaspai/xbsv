@@ -37,6 +37,7 @@ interface X7PcieSplitter#(numeric type lanes);
    interface Reset reset200;
    (* prefix = "" *)
    //interface DDR3_Pins_X7      ddr3;
+   interface GetPut#(TLPData#(16)) interrupt; // to the PcieInterruptEngine
    interface GetPut#(TLPData#(16)) master; // to the portal dma
    interface GetPut#(TLPData#(16)) slave;  // to the portal control
    interface Put#(TimestampedTlpData) trace;
@@ -195,6 +196,7 @@ module mkX7PcieSplitter#( Clock pci_sys_clk_p, Clock pci_sys_clk_n
 
    interface pcie     = _ep.pcie;
    //interface ddr3     = ddr3_ctrl.ddr3;
+   interface interrupt = bridge.interrupt;
    interface master   = bridge.master;
    interface slave    = bridge.slave;
    interface trace    = bridge.trace;

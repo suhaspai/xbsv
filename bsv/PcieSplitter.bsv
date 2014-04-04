@@ -43,6 +43,7 @@ interface PcieSplitter#(numeric type bpb);
 
    interface GetPut#(TLPData#(16)) tlps; // to the PCIe bus
    interface GetPut#(TLPData#(16)) csr; // to csr
+   interface GetPut#(TLPData#(16)) interrupt;
    interface GetPut#(TLPData#(16)) master; // to the portal control
    interface GetPut#(TLPData#(16)) slave;  // to the portal DMA
    interface Reset portalReset;
@@ -63,6 +64,7 @@ interface TLPDispatcher;
 
    // TLPs out to the bridge implementation
    interface Get#(TLPData#(16)) tlp_out_to_config;
+   interface Get#(TLPData#(16)) tlp_out_to_interrupt;
    interface Get#(TLPData#(16)) tlp_out_to_portal;
    interface Get#(TLPData#(16)) tlp_out_to_axi;
 
@@ -75,6 +77,7 @@ module mkTLPDispatcher(TLPDispatcher);
 
    FIFO#(TLPData#(16))  tlp_in_fifo     <- mkFIFO();
    FIFOF#(TLPData#(16)) tlp_in_cfg_fifo <- mkGFIFOF(True,False); // unguarded enq
+   FIFOF#(TLPData#(16)) tlp_in_interrupt_fifo <- mkGFIFOF(True,False); // unguarded enq
    FIFOF#(TLPData#(16)) tlp_in_portal_fifo <- mkGFIFOF(True,False); // unguarded enq
    FIFOF#(TLPData#(16)) tlp_in_axi_fifo <- mkGFIFOF(True,False); // unguarded enq
 
@@ -195,10 +198,12 @@ module mkTLPDispatcher(TLPDispatcher);
       end
    endrule: dispatch_incoming_TLP
 
-   interface Put tlp_in_from_bus    = toPut(tlp_in_fifo);
-   interface Get tlp_out_to_config  = toGet(tlp_in_cfg_fifo);
-   interface Get tlp_out_to_portal  = toGet(tlp_in_portal_fifo);
-   interface Get tlp_out_to_axi     = toGet(tlp_in_axi_fifo);
+   interface Put tlp_in_from_bus      = toPut(tlp_in_fifo);
+   interface Get tlp_out_to_config    = toGet(tlp_in_cfg_fifo);
+   interface Get tlp_out_to_interrupt = toGet(tlp_in_interrupt_fifo);
+   interface Get tlp_out_to_portal    = toGet(tlp_in_portal_fifo);
+   interface Get tlp_out_to_axi       = toGet(tlp_in_axi_fifo);
+
 endmodule: mkTLPDispatcher
 
 // Multiple sources of TLP packets must all share the PCIe bus. There
@@ -212,6 +217,7 @@ interface TLPArbiter;
 
    // TLPs in from the bridge implementation
    interface Put#(TLPData#(16)) tlp_in_from_config; // read completions
+   interface Put#(TLPData#(16)) tlp_in_from_interrupt; // MSIX messages; 
    interface Put#(TLPData#(16)) tlp_in_from_portal; // read completions
    interface Put#(TLPData#(16)) tlp_in_from_axi;    // read and write requests
 endinterface: TLPArbiter
@@ -221,10 +227,12 @@ module mkTLPArbiter(TLPArbiter);
 
    FIFO#(TLPData#(16))  tlp_out_fifo     <- mkFIFO();
    FIFOF#(TLPData#(16)) tlp_out_cfg_fifo <- mkGFIFOF(False,True); // unguarded deq
+   FIFOF#(TLPData#(16)) tlp_out_intr_fifo <- mkGFIFOF(False,True); // unguarded deq
    FIFOF#(TLPData#(16)) tlp_out_portal_fifo <- mkGFIFOF(False,True); // unguarded deq
    FIFOF#(TLPData#(16)) tlp_out_axi_fifo <- mkGFIFOF(False,True); // unguarded deq
 
    Reg#(Bool) route_from_cfg <- mkReg(False);
+   Reg#(Bool) route_from_intr <- mkReg(False);
    Reg#(Bool) route_from_portal <- mkReg(False);
    Reg#(Bool) route_from_axi <- mkReg(False);
 
@@ -242,6 +250,16 @@ module mkTLPArbiter(TLPArbiter);
             tlp_out_fifo.enq(tlp);
             if (tlp.eof)
                route_from_cfg <= False;
+         end
+      end
+      else if (route_from_intr) begin
+         // continue taking from the config FIFO until end-of-frame
+         if (tlp_out_intr_fifo.notEmpty()) begin
+            TLPData#(16) tlp = tlp_out_intr_fifo.first();
+            tlp_out_intr_fifo.deq();
+            tlp_out_fifo.enq(tlp);
+            if (tlp.eof)
+               route_from_intr <= False;
          end
       end
       else if (route_from_portal) begin
@@ -275,6 +293,17 @@ module mkTLPArbiter(TLPArbiter);
             is_completion.send();
          end
       end
+      else if (tlp_out_intr_fifo.notEmpty()) begin
+         // prioritize config read completions over portal traffic
+         TLPData#(16) tlp = tlp_out_intr_fifo.first();
+         tlp_out_intr_fifo.deq();
+         if (tlp.sof) begin
+            tlp_out_fifo.enq(tlp);
+            if (!tlp.eof)
+               route_from_intr <= True;
+            is_completion.send();
+         end
+      end
       else if (tlp_out_portal_fifo.notEmpty()) begin
          // prioritize portal read completions over AXI master traffic
          TLPData#(16) tlp = tlp_out_portal_fifo.first();
@@ -300,6 +329,7 @@ module mkTLPArbiter(TLPArbiter);
 
    interface Get tlp_out_to_bus     = toGet(tlp_out_fifo);
    interface Put tlp_in_from_config = toPut(tlp_out_cfg_fifo);
+   interface Put tlp_in_from_interrupt = toPut(tlp_out_intr_fifo);
    interface Put tlp_in_from_portal = toPut(tlp_out_portal_fifo);
    interface Put tlp_in_from_axi    = toPut(tlp_out_axi_fifo);
 endmodule
@@ -358,29 +388,28 @@ module mkPcieSplitter#( Bit#(64)  board_content_id
 
    FIFO#(TLPData#(16)) tlpFromBusFifo <- mkFIFO();
    Reg#(Bool) skippingIncomingTlps <- mkReg(False);
-   PulseWire fromPcie <- mkPulseWire;
-   PulseWire   toPcie <- mkPulseWire;
-   Wire#(TLPData#(16)) fromPcieTlp <- mkDWire(unpack(0));
-   Wire#(TLPData#(16))   toPcieTlp <- mkDWire(unpack(0));
+   FIFOF#(TLPData#(16)) fromPcieTlp <- mkFIFOF();
+   FIFOF#(Bool)         fromPcieSkip <- mkFIFOF();
+   FIFOF#(TLPData#(16))   toPcieTlp <- mkFIFOF();
    rule traceTlpFromBus;
-       let tlp = tlpFromBusFifo.first;
-       tlpFromBusFifo.deq();
-       dispatcher.tlp_in_from_bus.put(tlp);
-       $display("tlp in: %h\n", tlp);
+      let tlp = tlpFromBusFifo.first;
+      tlpFromBusFifo.deq();
+      dispatcher.tlp_in_from_bus.put(tlp);
+      $display("tlp in: %h\n", tlp);
        if (csr.tlpTracing) begin
-           TLPMemoryIO3DWHeader hdr_3dw = unpack(tlp.data);
-           // skip root_broadcast_messages sent to tlp.hit 0                                                                                                  
-           if (tlp.sof && tlp.hit == 0 && hdr_3dw.pkttype != COMPLETION) begin
+	  fromPcieTlp.enq(tlp);
+          TLPMemoryIO3DWHeader hdr_3dw = unpack(tlp.data);
+          // skip root_broadcast_messages sent to tlp.hit 0                                                                                                  
+          if (tlp.sof && tlp.hit == 0 && hdr_3dw.pkttype != COMPLETION) begin
  	      skippingIncomingTlps <= True;
-	   end
-	   else if (skippingIncomingTlps && !tlp.sof) begin
-	      // do nothing
-	   end
-	   else begin
-	      fromPcie.send();
-	      fromPcieTlp <= tlp;
-	       skippingIncomingTlps <= False;
-	   end
+	  end
+	  else if (skippingIncomingTlps && !tlp.sof) begin
+	     // do nothing
+	  end
+	  else begin
+	     skippingIncomingTlps <= False;
+	  end
+	  fromPcieSkip.enq(skippingIncomingTlps);
        end
    endrule: traceTlpFromBus
 
@@ -389,19 +418,41 @@ module mkPcieSplitter#( Bit#(64)  board_content_id
        let tlp <- arbiter.tlp_out_to_bus.get();
        tlpToBusFifo.enq(tlp);
        if (csr.tlpTracing) begin
-	  toPcie.send();
-	  toPcieTlp <= tlp;
+	  toPcieTlp.enq(tlp);
        end
    endrule: traceTlpToBus
 
-   rule doTracing if (fromPcie || toPcie);
-      TimestampedTlpData fromttd = fromPcie ? TimestampedTlpData { timestamp: timestamp, source: 7'h04, tlp: fromPcieTlp } : unpack(0);
-      csr.fromPcieTraceBramPort.request.put(BRAMRequest{ write: True, responseOnWrite: False, address: truncate(csr.fromPcieTraceBramWrAddr), datain: fromttd });
-      csr.fromPcieTraceBramWrAddr <= csr.fromPcieTraceBramWrAddr + 1;
+   rule doTracing if (fromPcieTlp.notEmpty() || toPcieTlp.notEmpty());
+      Bool traceFrom = fromPcieTlp.notEmpty();
+      Bool traceTo = toPcieTlp.notEmpty;
+      TLPData#(16) fromTlp = unpack(0);
+      TLPData#(16)   toTlp = unpack(0);
+      if (traceFrom) begin
+	 fromPcieTlp.deq();
+	 Bool skippingFrom = fromPcieSkip.first();
+	 fromPcieSkip.deq();
+	 if (skippingFrom)
+	    traceFrom = False;
+	 else
+	    fromTlp = fromPcieTlp.first();
+      end
+      if (traceTo) begin
+	 toTlp = toPcieTlp.first();
+	 toPcieTlp.deq();
+      end
 
-      TimestampedTlpData   tottd = toPcie ? TimestampedTlpData { timestamp: timestamp, source: 7'h08, tlp: toPcieTlp } : unpack(0);
-      csr.toPcieTraceBramPort.request.put(BRAMRequest{ write: True, responseOnWrite: False, address: truncate(csr.toPcieTraceBramWrAddr), datain: tottd });
-      csr.toPcieTraceBramWrAddr <= csr.toPcieTraceBramWrAddr + 1;
+      Bool tracing = False; //traceFrom || traceTo;
+      TimestampedTlpData fromttd = traceFrom ? TimestampedTlpData { timestamp: timestamp, source: 7'h04, tlp: fromTlp } : unpack(0);
+      if (tracing) begin
+	 csr.fromPcieTraceBramPort.request.put(BRAMRequest{ write: True, responseOnWrite: False, address: truncate(csr.fromPcieTraceBramWrAddr), datain: fromttd });
+	 csr.fromPcieTraceBramWrAddr <= csr.fromPcieTraceBramWrAddr + 1;
+      end
+
+      TimestampedTlpData   tottd = traceTo ? TimestampedTlpData { timestamp: timestamp, source: 7'h08, tlp: toTlp } : unpack(0);
+      if (tracing) begin
+	 csr.toPcieTraceBramPort.request.put(BRAMRequest{ write: True, responseOnWrite: False, address: truncate(csr.toPcieTraceBramWrAddr), datain: tottd });
+	 csr.toPcieTraceBramWrAddr <= csr.toPcieTraceBramWrAddr + 1;
+      end
    endrule
 
    // route the interfaces to the sub-components

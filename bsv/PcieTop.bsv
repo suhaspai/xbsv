@@ -31,11 +31,12 @@ import X7PcieSplitter    :: *;
 import Portal            :: *;
 import Leds              :: *;
 import Top               :: *;
-import AxiSlaveEngine    :: *;
-import AxiMasterEngine   :: *;
-import AxiMasterSlave    :: *;
-import AxiDma            :: *;
-import AxiCsr            :: *;
+import PcieInterruptEngine :: *;
+import AxiSlaveEngine      :: *;
+import AxiMasterEngine     :: *;
+import AxiMasterSlave      :: *;
+import AxiDma              :: *;
+import AxiCsr              :: *;
 
 typedef (function Module#(PortalTop#(40, dsz, ipins)) mkPortalTop()) MkPortalTop#(numeric type dsz, type ipins);
 
@@ -86,6 +87,7 @@ module [Module] mkPcieTopFromPortal #(Clock pci_sys_clk_p, Clock pci_sys_clk_n,
    let portalTop <- mkPortalTop(clocked_by x7pcie.clock250, reset_by x7pcie.portalReset);
    AxiSlaveEngine#(dsz) axiSlaveEngine <- mkAxiSlaveEngine(x7pcie.pciId(), clocked_by x7pcie.clock250, reset_by x7pcie.reset250);
    AxiMasterEngine axiMasterEngine <- mkAxiMasterEngine(x7pcie.pciId(), clocked_by x7pcie.clock250, reset_by x7pcie.reset250);
+   PcieInterruptEngine interruptEngine <- mkPcieInterruptEngine(x7pcie.pciId(), clocked_by x7pcie.clock250, reset_by x7pcie.reset250);
 
    mkConnection(tpl_1(x7pcie.slave), tpl_2(axiSlaveEngine.tlps), clocked_by x7pcie.clock250, reset_by x7pcie.reset250);
    mkConnection(tpl_1(axiSlaveEngine.tlps), tpl_2(x7pcie.slave), clocked_by x7pcie.clock250, reset_by x7pcie.reset250);
@@ -94,6 +96,9 @@ module [Module] mkPcieTopFromPortal #(Clock pci_sys_clk_p, Clock pci_sys_clk_n,
 
    mkConnection(tpl_1(x7pcie.master), axiMasterEngine.tlp_in);
    mkConnection(axiMasterEngine.tlp_out, tpl_2(x7pcie.master));
+
+   mkConnection(tpl_1(x7pcie.interrupt), interruptEngine.tlp_in);
+   mkConnection(interruptEngine.tlp_out, tpl_2(x7pcie.interrupt));
 
    Axi3Slave#(32,32,12) ctrl <- mkAxiDmaSlave(portalTop.slave, clocked_by x7pcie.clock250, reset_by x7pcie.reset250);
    mkConnection(axiMasterEngine.master, ctrl, clocked_by x7pcie.clock250, reset_by x7pcie.reset250);
@@ -133,7 +138,7 @@ module [Module] mkPcieTopFromPortal #(Clock pci_sys_clk_p, Clock pci_sys_clk_n,
 		    end
 	    MsgData: begin
 			let msgData = msixEntry;
-			axiMasterEngine.interruptRequest.put(tuple2({addrHi, addrLo}, msgData));
+			interruptEngine.interruptRequest.put(tuple2({addrHi, addrLo}, msgData));
 			interruptRequested[interruptNumber] <= portalTop.interrupt[interruptNumber];
 			nextState = Idle;
 		     end

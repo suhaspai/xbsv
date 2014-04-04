@@ -38,14 +38,11 @@ interface AxiMasterEngine;
     interface Put#(TLPData#(16))   tlp_in;
     interface Get#(TLPData#(16))   tlp_out;
     interface Axi3Master#(32,32,12) master;
-    interface Put#(Tuple2#(Bit#(64),Bit#(32))) interruptRequest;
     interface Reg#(Bit#(12))       bTag;
 endinterface
 
 (* synthesize *)
 module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
-    FIFOF#(Tuple2#(Bit#(64),Bit#(32))) interruptRequestFifo <- mkSizedFIFOF(16);
-    Reg#(Maybe#(Bit#(32))) interruptSecondHalf <- mkReg(tagged Invalid);
     Reg#(Bit#(7)) hitReg <- mkReg(0);
     Reg#(Bit#(4)) timerReg <- mkReg(0);
     FIFOF#(TLPMemoryIO3DWHeader) readHeaderFifo <- mkSizedFIFOF(8);
@@ -64,7 +61,7 @@ module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
    Reg#(Bool) readLastReg                 <- mkReg(False);
    Reg#(Bool) readBurstGreaterThan4       <- mkReg(False);
    Reg#(Bool) readDeqReadyN               <- mkReg(False);
-   rule completionHeaderCheck if (!completionHeaderReady && readDataFifo.notEmpty() && completionMimo.deqReadyN(1) &&& interruptSecondHalf matches tagged Invalid);
+   rule completionHeaderCheck if (!completionHeaderReady && readDataFifo.notEmpty() && completionMimo.deqReadyN(1));
       let hdr = readDataFifo.first;
       TLPLength rbc = hdr.length;
       completionHeaderReady <= True;
@@ -162,73 +159,6 @@ module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
       timerReg <= timerReg - 1;
    endrule
 
-    rule interruptTlpOut if (interruptRequestFifo.notEmpty &&& interruptSecondHalf matches tagged Invalid);
-       TLPData#(16) tlp = defaultValue;
-       tlp.sof = True;
-       tlp.eof = False;
-       tlp.hit = 7'h00;
-       tlp.be = 16'hffff;
-
-       let interruptRequested = True;
-       let sendInterrupt = False;
-
-       Bit#(64) interruptAddr = tpl_1(interruptRequestFifo.first);
-       Bit#(32) interruptData = tpl_2(interruptRequestFifo.first);
-       if (interruptAddr == '0) begin
-	  // do not write to 0 -- it wedges the host
-	  interruptRequested = False;
-       end
-       else if (interruptAddr[63:32] == '0) begin
-          TLPMemoryIO3DWHeader hdr_3dw = defaultValue();
-          hdr_3dw.format = MEM_WRITE_3DW_DATA;
-	  //hdr_3dw.pkttype = MEM_READ_WRITE;
-          hdr_3dw.tag = tlpTag;
-          hdr_3dw.reqid = my_id;
-          hdr_3dw.length = 1;
-          hdr_3dw.firstbe = '1;
-          hdr_3dw.lastbe = '0;
-          hdr_3dw.addr = interruptAddr[31:2];
-	  hdr_3dw.data = byteSwap(interruptData);
-	  tlp.data = pack(hdr_3dw);
-	  tlp.eof = True;
-	  sendInterrupt = True;
-	  interruptRequested = False;
-       end
-       else begin
-	  TLPMemory4DWHeader hdr_4dw = defaultValue;
-	  hdr_4dw.format = MEM_WRITE_4DW_DATA;
-	  //hdr_4dw.pkttype = MEM_READ_WRITE;
-	  hdr_4dw.tag = tlpTag;
-	  hdr_4dw.reqid = my_id;
-	  hdr_4dw.nosnoop = SNOOPING_REQD;
-	  hdr_4dw.addr = interruptAddr[40-1:2];
-	  hdr_4dw.length = 1;
-	  hdr_4dw.firstbe = 4'hf;
-	  hdr_4dw.lastbe = 0;
-	  tlp.data = pack(hdr_4dw);
-
-	  sendInterrupt = True;
-	  interruptSecondHalf <= tagged Valid interruptData;
-       end
-
-       if (!interruptRequested)
-	  interruptRequestFifo.deq();
-       if (sendInterrupt)
-	  tlpOutFifo.enq(tlp);
-    endrule
-
-    rule interruptTlpDataOut if (interruptSecondHalf matches tagged Valid .interruptData);
-       TLPData#(16) tlp = defaultValue;
-       tlp.sof = False;
-       tlp.eof = True;
-       tlp.hit = 7'h00;
-       tlp.be = 16'hf000;
-       tlp.data[7+8*15:8*12] = byteSwap(interruptData);
-       tlpOutFifo.enq(tlp);
-       interruptSecondHalf <= tagged Invalid;
-       interruptRequestFifo.deq();
-    endrule
-
     interface Put tlp_in;
         method Action put(TLPData#(16) tlp);
 	    //$display("AxiMasterEngine.put tlp=%h", tlp);
@@ -252,7 +182,7 @@ module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
     interface Get tlp_out = toGet(tlpOutFifo);
     interface Axi3Master master;
        interface Get req_aw;
-	  method ActionValue#(Axi3WriteRequest#(32,12)) get() if (interruptSecondHalf matches tagged Invalid);
+	  method ActionValue#(Axi3WriteRequest#(32,12)) get();
 	     let hdr = writeHeaderFifo.first;
 	     writeHeaderFifo.deq;
 	     writeDataFifo.enq(hdr);
@@ -292,10 +222,5 @@ module mkAxiMasterEngine#(PciId my_id)(AxiMasterEngine);
 	  endmethod
 	endinterface: resp_read
     endinterface: master
-    interface Put interruptRequest;
-       method Action put(Tuple2#(Bit#(64),Bit#(32)) intr);
-          interruptRequestFifo.enq(intr);
-       endmethod
-    endinterface
     interface Reg bTag = bTagReg;
 endmodule: mkAxiMasterEngine
