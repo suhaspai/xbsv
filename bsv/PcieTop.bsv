@@ -71,7 +71,7 @@ module [Module] mkPcieTopFromPortal #(Clock pci_sys_clk_p, Clock pci_sys_clk_n,
 	     Add#(d__, TMul#(8, TDiv#(dsz, 32)), 64),
 	     Add#(e__, TMul#(32, TDiv#(dsz, 32)), 256),
 	     Add#(f__, TDiv#(dsz, 32), 8),
-	     Mul#(TDiv#(dsz, 8), 8, dsz)
+	     Mul#(TDiv#(dsz, 8), 8, dsz),
 	     Add#(g__, TMul#(8, TDiv#(dsz, 32)), 32),
 	     Add#(h__, dsz, 128),
 	     Add#(i__, TDiv#(dsz, 32), 4)
