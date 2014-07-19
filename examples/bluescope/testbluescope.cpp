@@ -26,6 +26,9 @@
 #include <pthread.h>
 #include <monkit.h>
 #include <semaphore.h>
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+
 #include "StdDmaIndication.h"
 
 #include "BlueScopeIndicationWrapper.h"
@@ -42,20 +45,28 @@ PortalAlloc *bsAlloc;
 unsigned int *srcBuffer = 0;
 unsigned int *dstBuffer = 0;
 unsigned int *bsBuffer  = 0;
-int numWords = 16 << 10;
+int numWords = 128; //16 << 10;
 size_t alloc_sz = numWords*sizeof(unsigned int);
 bool trigger_fired = false;
 bool finished = false;
 bool memcmp_fail = false;
 unsigned int memcmp_count = 0;
 
-void dump(const char *prefix, char *buf, size_t len)
+static void memdump(void *p, int len, const char *title)
 {
-    fprintf(stderr, "%s ", prefix);
-    for (int i = 0; i < len ; i++) {
-	fprintf(stderr, "%02x", (unsigned char)buf[i]);
-	if (i % 32 == 31)
-	  fprintf(stderr, "\n");
+int i;
+
+    i = 0;
+    while (len > 0) {
+        if (!(i & 0xf)) {
+            if (i > 0)
+                fprintf(stderr, "\n");
+            fprintf(stderr, "%s: ",title);
+        }
+        fprintf(stderr, "%02x ", *(unsigned char *)p);
+        p = (unsigned char *)p + 1;
+        i++;
+        len--;
     }
     fprintf(stderr, "\n");
 }
@@ -82,12 +93,10 @@ public:
     unsigned int mcf = memcmp(srcBuffer, dstBuffer, numWords*sizeof(unsigned int));
     memcmp_fail |= mcf;
     fprintf(stderr, "memcpy done:\n");
-    if(false){
-      fprintf(stderr, "(%d) memcmp src=%lx dst=%lx success=%s\n", memcmp_count, (long)srcBuffer, (long)dstBuffer, mcf == 0 ? "pass" : "fail");
-      dump("src", (char*)srcBuffer, 128);
-      dump("dst", (char*)dstBuffer, 128);
-      dump("dbg", (char*)bsBuffer,  128);   
-    }
+    fprintf(stderr, "(%d) memcmp src=%lx dst=%lx success=%s\n", memcmp_count, (long)srcBuffer, (long)dstBuffer, mcf == 0 ? "pass" : "fail");
+    memdump(srcBuffer, 128, "src");
+    memdump(dstBuffer, 128, "dst");
+    memdump(bsBuffer,  128, "dbg");
   }
 };
 
@@ -96,15 +105,15 @@ class BlueScopeIndication : public BlueScopeIndicationWrapper
 public:
   BlueScopeIndication(unsigned int id) : BlueScopeIndicationWrapper(id){}
 
+  virtual void done( ){
+    fprintf(stderr, "BlueScope::done\n");
+  }
   virtual void triggerFired( ){
     fprintf(stderr, "BlueScope::triggerFired\n");
     trigger_fired = true;
   }
   virtual void reportStateDbg(uint64_t mask, uint64_t value){
-    //fprintf(stderr, "BlueScope::reportStateDbg mask=%016llx, value=%016llx\n", mask, value);
-    fprintf(stderr, "BlueScope::reportStateDbg\n");
-    dump("    mask =", (char*)&mask, sizeof(mask));
-    dump("   value =", (char*)&value, sizeof(value));
+    fprintf(stderr, "BlueScope::reportStateDbg mask=%" PRIu64 ", value=%" PRIu64 "\n", mask, value);
   }
 };
 
@@ -120,7 +129,7 @@ int main(int argc, const char **argv)
 {
   MemcpyRequestProxy *device = 0;
   BlueScopeRequestProxy *bluescope = 0;
-  DmaConfigProxy *dma = 0;
+  DmaConfigProxy *dmap = 0;
   
   MemcpyIndication *deviceIndication = 0;
   BlueScopeIndication *bluescopeIndication = 0;
@@ -135,13 +144,14 @@ int main(int argc, const char **argv)
 
   device = new MemcpyRequestProxy(IfcNames_MemcpyRequest);
   bluescope = new BlueScopeRequestProxy(IfcNames_BluescopeRequest);
-  dma = new DmaConfigProxy(IfcNames_DmaConfig);
+  dmap = new DmaConfigProxy(IfcNames_DmaConfig);
+  DmaManager *dma = new DmaManager(dmap);
 
   deviceIndication = new MemcpyIndication(IfcNames_MemcpyIndication);
   bluescopeIndication = new BlueScopeIndication(IfcNames_BluescopeIndication);
   dmaIndication = new DmaIndication(dma, IfcNames_DmaIndication);
 
-  fprintf(stderr, "Main::allocating memory...\n");
+  fprintf(stderr, "Main::allocating memory of size=%d...\n", (int)alloc_sz);
 
   dma->alloc(alloc_sz, &srcAlloc);
   dma->alloc(alloc_sz, &dstAlloc);
@@ -184,20 +194,19 @@ int main(int argc, const char **argv)
   bluescope->reset();
   bluescope->setTriggerMask (0xFFFFFFFF);
   bluescope->setTriggerValue(0x00000008);
-  bluescope->start(ref_bsAlloc);
+  bluescope->start(ref_bsAlloc, alloc_sz);
 
   sleep(1);
-  dma->addrRequest(ref_srcAlloc, 1*sizeof(unsigned int));
+  dmap->addrRequest(ref_srcAlloc, 1*sizeof(unsigned int));
   sleep(1);
-  dma->addrRequest(ref_dstAlloc, 2*sizeof(unsigned int));
+  dmap->addrRequest(ref_dstAlloc, 2*sizeof(unsigned int));
   sleep(1);
-  dma->addrRequest(ref_bsAlloc, 3*sizeof(unsigned int));
+  dmap->addrRequest(ref_bsAlloc, 3*sizeof(unsigned int));
   sleep(1);
   
   fprintf(stderr, "Main::starting mempcy numWords:%d\n", numWords);
   int burstLen = 16;
-  int iterCnt = 2;
-  device->startCopy(ref_dstAlloc, ref_srcAlloc, numWords, burstLen, iterCnt);
+  device->startCopy(ref_dstAlloc, ref_srcAlloc, numWords, burstLen);
   sem_wait(&done_sem);
   sleep(2);
   exit_test();

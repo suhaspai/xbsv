@@ -46,8 +46,8 @@ public:
     fprintf(stderr, "rData (%08x): ", rDataCnt++);
     dump("", (char*)&v, sizeof(v));
   }
-  virtual void reportStateDbg(uint32_t streamRdCnt, uint32_t dataMismatch){
-    fprintf(stderr, "Memread2::reportStateDbg: streamRdCnt=%08x dataMismatch=%d\n", streamRdCnt, dataMismatch);
+  virtual void reportStateDbg(uint32_t x, uint32_t y){
+    fprintf(stderr, "Memread2::reportStateDbg: x=%08x y=%08x\n", x, y);
   }  
   virtual void mismatch(uint32_t offset, uint64_t ev, uint64_t v) {
     fprintf(stderr, "Mismatch at %x %zx != %zx\n", offset, ev, v);
@@ -67,7 +67,7 @@ int main(int argc, const char **argv)
   unsigned int srcGen = 0;
 
   Memread2RequestProxy *device = 0;
-  DmaConfigProxy *dma = 0;
+  DmaConfigProxy *dmap = 0;
   
   Memread2Indication *deviceIndication = 0;
   DmaIndication *dmaIndication = 0;
@@ -75,7 +75,8 @@ int main(int argc, const char **argv)
   fprintf(stderr, "Main::%s %s\n", __DATE__, __TIME__);
 
   device = new Memread2RequestProxy(IfcNames_Memread2Request);
-  dma = new DmaConfigProxy(IfcNames_DmaConfig);
+  dmap = new DmaConfigProxy(IfcNames_DmaConfig);
+  DmaManager *dma = new DmaManager(dmap);
 
   deviceIndication = new Memread2Indication(IfcNames_Memread2Indication);
   dmaIndication = new DmaIndication(dma, IfcNames_DmaIndication);
@@ -96,7 +97,7 @@ int main(int argc, const char **argv)
   for (int i = 0; i < numWords; i++){
     int v = srcGen++;
     srcBuffer[i] = v;
-    srcBuffer2[i] = v * 3;;
+    srcBuffer2[i] = v*3;
   }
     
   dma->dCacheFlushInval(srcAlloc, srcBuffer);
@@ -108,9 +109,13 @@ int main(int argc, const char **argv)
   fprintf(stderr, "ref_srcAlloc2=%d\n", ref_srcAlloc2);
 
   fprintf(stderr, "Main::starting read %08x\n", numWords);
-  device->startRead(ref_srcAlloc, ref_srcAlloc2, 128, 2);
-
-  device->getStateDbg();
+  device->startRead(ref_srcAlloc, ref_srcAlloc2, 32, 16);
   fprintf(stderr, "Main::sleeping\n");
-  while(true){sleep(1);}
+  while(true){
+    sleep(3);
+    device->getStateDbg();
+    uint64_t beats = dma->show_mem_stats(ChannelType_Read);
+    fprintf(stderr, "   beats: %"PRIx64"\n", beats);
+    dmap->getStateDbg(ChannelType_Read);
+  }
 }

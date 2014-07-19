@@ -27,33 +27,36 @@ import Bscan::*;
 import Vector::*;
 import FIFOF::*;
 
-typeclass ConnectableWithTrace#(type a, type b);
-   module mkConnectionWithTrace#(a x1, b x2)(Empty);
+typeclass ConnectableWithTrace#(type a, type b, type c);
+   module mkConnectionWithTrace#(a x1, b x2, c x3)(Empty);
 endtypeclass
 
 //`define TRACE_AXI
 //`define AXI_READ_TIMING
 //`define AXI_WRITE_TIMING
+`define TRACE_ADDR_WIDTH 12 //8
+`define TRACE_ADDR_SIZE  4096 //256
 
-instance ConnectableWithTrace#(Axi3Master#(addrWidth, busWidth,idWidth), Axi3Slave#(addrWidth, busWidth,idWidth))
+instance ConnectableWithTrace#(Axi3Master#(addrWidth, busWidth,idWidth), Axi3Slave#(addrWidth, busWidth,idWidth), BscanTop)
    provisos(Add#(0,addrWidth,32));
-   module mkConnectionWithTrace#(Axi3Master#(addrWidth, busWidth,idWidth) m, Axi3Slave#(addrWidth, busWidth,idWidth) s)(Empty);
+   module mkConnectionWithTrace#(Axi3Master#(addrWidth, busWidth,idWidth) m, Axi3Slave#(addrWidth, busWidth,idWidth) s, BscanTop bscan)(Empty);
 
-`ifdef 0 //ndef TRACE_AXI
-   blah
+`ifndef TRACE_AXI
    mkConnection(m, s);
 `else
    
    Clock defaultClock <- exposeCurrentClock();
    Reset defaultReset <- exposeCurrentReset();
-   Reg#(Bit#(8)) addrReg <- mkReg(9);
-   BscanBram#(Bit#(8), Bit#(64)) bscanBram <- mkBscanBram(1, addrReg);
+   Reg#(Bit#(`TRACE_ADDR_WIDTH)) addrReg <- mkReg(9);
+   BscanBram#(Bit#(`TRACE_ADDR_WIDTH), Bit#(64)) bscanBram <- mkBscanBram(127, addrReg, bscan);
    BRAM_Configure bramCfg = defaultValue;
-   bramCfg.memorySize = 256;
+   bramCfg.memorySize = `TRACE_ADDR_SIZE;
    bramCfg.latency = 1;
-   BRAM2Port#(Bit#(8), Bit#(64)) traceBram <- mkSyncBRAM2Server(bramCfg, defaultClock, defaultReset,
-								bscanBram.jtagClock, bscanBram.jtagReset);
+   BRAM2Port#(Bit#(`TRACE_ADDR_WIDTH), Bit#(64)) traceBram <- mkBRAM2Server(bramCfg);
    mkConnection(bscanBram.bramClient, traceBram.portB);
+   rule tdorule;
+      bscan.tdo(bscanBram.data_out());
+   endrule
 
    Vector#(5, FIFOF#(Bit#(64))) bscan_fifos <- replicateM(mkFIFOF);
 

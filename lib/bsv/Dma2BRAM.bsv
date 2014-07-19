@@ -27,11 +27,13 @@ import Vector::*;
 import Gearbox::*;
 import FIFOF::*;
 import SpecialFIFOs::*;
+import GetPut::*;
+import ClientServer::*;
 
-import BRAMFIFOFLevel::*;
-import Dma::*;
-import MemreadEngine::*;
+import MemTypes::*;
 import MemwriteEngine::*;
+import MemUtils::*;
+import Pipe::*;
 
 interface BRAMReadClient#(numeric type bramIdxWidth, numeric type busWidth);
    method Action start(ObjectPointer h, Bit#(ObjectOffsetSize) base, Bit#(bramIdxWidth) start_idx, Bit#(bramIdxWidth) finish_idx);
@@ -63,27 +65,20 @@ module mkBRAMReadClient#(BRAMServer#(Bit#(bramIdxWidth),d) br)(BRAMReadClient#(b
    Reg#(Bit#(ObjectOffsetSize)) off <- mkReg(0);
    Gearbox#(nd,1,d) gb <- mkNto1Gearbox(clk,rst,clk,rst); 
    
-   FIFOF#(Bit#(busWidth)) readFifo = (interface FIFOF;
-				      method Bit#(busWidth) first(); return ?; endmethod
-				      method Bool notEmpty(); return False; endmethod
-				      method Action enq(Bit#(busWidth) d); gb.enq(unpack(d)); endmethod
-				      method Action deq; endmethod
-				      method Action clear; endmethod
-				      method Bool notFull(); return gb.notFull(); endmethod
-				      endinterface);
-   MemreadEngine#(busWidth) re <- mkMemreadEngine(1, readFifo);
    let bus_width_in_bytes = fromInteger(valueOf(busWidth)/8);
+   MemReader#(busWidth) re <- mkMemReader;
+   
+   rule feed_gearbox;
+      let v <- re.readServer.readData.get;
+      gb.enq(unpack(v.data));
+   endrule
    
    rule loadReq(i <= n);
-      re.start(ptr, off, bus_width_in_bytes, bus_width_in_bytes);
+      re.readServer.readReq.put(ObjectRequest{pointer:ptr, offset:off, burstLen:bus_width_in_bytes, tag:0});
       off <= off+bus_width_in_bytes;
       i <= i+fromInteger(valueOf(nd));
    endrule
-   
-   rule loadResp;
-      let __x <- re.finish;
-   endrule
-   
+      
    rule load(j <= n);
       br.request.put(BRAMRequest{write:True, responseOnWrite:False, address:truncate(j), datain:gb.first[0]});
       gb.deq;
@@ -111,7 +106,7 @@ module mkBRAMReadClient#(BRAMServer#(Bit#(bramIdxWidth),d) br)(BRAMReadClient#(b
       return True;
    endmethod
    
-   interface dmaClient = re.dmaClient;
+   interface dmaClient = re.readClient;
 
 endmodule
 
@@ -135,16 +130,14 @@ module mkBRAMWriteClient#(BRAMServer#(Bit#(bramIdxWidth),d) br)(BRAMWriteClient#
    Reg#(Bit#(ObjectOffsetSize)) off <- mkReg(0);
    Gearbox#(1,nd,Bit#(dsz)) gb <- mk1toNGearbox(clk,rst,clk,rst);
    
-   FIFOF#(Bit#(busWidth)) writeFifo = (interface FIFOF;
-				       method Bit#(busWidth) first(); return pack(gb.first); endmethod
-				       method Bool notEmpty(); return gb.notEmpty(); endmethod
-				       method Action enq(Bit#(busWidth) d); endmethod
-				       method Action deq; gb.deq(); endmethod
-				       method Action clear; endmethod
-				       method Bool notFull(); return(False); endmethod
-				       endinterface);
-   MemwriteEngine#(busWidth) we <- mkMemwriteEngine(1, writeFifo);
-   let bus_width_in_bytes = fromInteger(valueOf(busWidth)/8);
+   MemwriteEngine#(busWidth,1) we <- mkMemwriteEngine;
+   Bit#(ObjectOffsetSize) bus_width_in_bytes = fromInteger(valueOf(busWidth)/8);
+      
+   rule drain_geatbox;
+      Vector#(nd,Bit#(dsz)) v = gb.first;
+      we.dataPipes[0].enq(pack(v));
+      gb.deq;
+   endrule
    
    rule bramReq(j <= n);
       //$display("mkBRAMWriteClient::bramReq %h", j);
@@ -158,14 +151,14 @@ module mkBRAMWriteClient#(BRAMServer#(Bit#(bramIdxWidth),d) br)(BRAMWriteClient#
    endrule
    
    rule loadReq(i <= n);
-      we.start(ptr, off, bus_width_in_bytes, bus_width_in_bytes);
+      we.writeServers[0].request.put(MemengineCmd{pointer:ptr, base:off, len:truncate(bus_width_in_bytes), burstLen:truncate(bus_width_in_bytes)});
       off <= off+bus_width_in_bytes;
       i <= i+fromInteger(valueOf(nd));
       //$display("mkBRAMWriteClient::loadReq %h", i);
    endrule
    
    rule loadResp;
-      let __x <- we.finish;
+      let __x <- we.writeServers[0].response.get;
       if (i > n)
 	 f.enq(?);
    endrule

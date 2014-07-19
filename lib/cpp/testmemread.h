@@ -28,17 +28,18 @@
 
 sem_t test_sem;
 
-#ifdef MMAP_HW
-int numWords = 0x1240000/4; // make sure to allocate at least one entry of each size
-#else
-int numWords = 0x12400/4;
-#endif
 
 int burstLen = 16;
 #ifdef MMAP_HW
 int iterCnt = 64;
 #else
-int iterCnt = 2;
+int iterCnt = 3;
+#endif
+
+#ifdef MMAP_HW
+int numWords = 0x1240000/4; // make sure to allocate at least one entry of each size
+#else
+int numWords = 0x124000/4;
 #endif
 
 size_t test_sz  = numWords*sizeof(unsigned int);
@@ -82,7 +83,7 @@ void runtest(int argc, const char ** argv)
   unsigned int *srcBuffer = 0;
 
   MemreadRequestProxy *device = 0;
-  DmaConfigProxy *dma = 0;
+  DmaConfigProxy *dmap = 0;
   
   MemreadIndication *deviceIndication = 0;
   DmaIndication *dmaIndication = 0;
@@ -90,7 +91,8 @@ void runtest(int argc, const char ** argv)
   fprintf(stderr, "Main::%s %s\n", __DATE__, __TIME__);
 
   device = new MemreadRequestProxy(IfcNames_MemreadRequest);
-  dma = new DmaConfigProxy(IfcNames_DmaConfig);
+  dmap = new DmaConfigProxy(IfcNames_DmaConfig);
+  DmaManager *dma = new DmaManager(dmap);
 
   deviceIndication = new MemreadIndication(IfcNames_MemreadIndication);
   dmaIndication = new DmaIndication(dma, IfcNames_DmaIndication);
@@ -112,6 +114,8 @@ void runtest(int argc, const char ** argv)
     
   dma->dCacheFlushInval(srcAlloc, srcBuffer);
   fprintf(stderr, "Main::flush and invalidate complete\n");
+  device->getStateDbg();
+  fprintf(stderr, "Main::after getStateDbg\n");
 
   unsigned int ref_srcAlloc = dma->reference(srcAlloc);
   fprintf(stderr, "ref_srcAlloc=%d\n", ref_srcAlloc);

@@ -29,40 +29,6 @@ import util
 import functools
 import math
 
-applicationmk_template='''
-APP_STL                 := stlport_static
-'''
-
-androidmk_template='''
-include $(CLEAR_VARS)
-LOCAL_ARM_MODE := arm
-APP_SRC_FILES := $(addprefix %(project_dir)s/jni/,  %(generatedCFiles)s) %(cfiles)s
-PORTAL_SRC_FILES := $(addprefix %(xbsvdir)s/cpp/, portal.cpp PortalMemory.cpp sock_fd.cxx sock_utils.cxx)
-LOCAL_SRC_FILES := $(APP_SRC_FILES) $(PORTAL_SRC_FILES)
-
-LOCAL_PATH :=
-LOCAL_MODULE := %(exe)s
-LOCAL_MODULE_TAGS := optional
-LOCAL_LDLIBS := -llog
-LOCAL_CPPFLAGS := "-march=armv7-a"
-LOCAL_CXXFLAGS := -DZYNQ -DMMAP_HW -I%(xbsvdir)s -I%(xbsvdir)s/lib/cpp -I%(xbsvdir)s/cpp -I%(xbsvdir)s/drivers/zynqportal -I%(project_dir)s/jni
-
-#NDK_OUT := obj/
-
-include $(BUILD_EXECUTABLE)
-'''
-
-linuxmakefile_template='''
-CFLAGS = -DMMAP_HW -O -g -I. -I%(xbsvdir)s/cpp -I%(xbsvdir)s -I%(xbsvdir)s/lib/cpp %(sourceincludes)s
-
-PORTAL_CPP_FILES = $(addprefix %(xbsvdir)s/cpp/, portal.cpp PortalMemory.cpp sock_fd.cxx sock_utils.cxx)
-
-
-test%(classname)s: %(swProxies)s %(swWrappers)s $(PORTAL_CPP_FILES) %(source)s
-	g++ $(CFLAGS) -o %(classname)s %(swProxies)s %(swWrappers)s $(PORTAL_CPP_FILES) %(source)s %(clibs)s -pthread 
-'''
-
-
 proxyClassPrefixTemplate='''
 class %(namespace)s%(className)s : public %(parentClass)s {
 //proxyClass
@@ -107,41 +73,38 @@ wrapperConstructorTemplate='''
 putFailedMethodName = "putFailed"
 
 putFailedTemplate='''
-void %(namespace)s%(className)s::%(putFailedMethodName)s(uint32_t v){
+void %(namespace)s%(className)s%(putFailedMethodName)s_cb(struct PortalInternal *p, const uint32_t v)
+{
     const char* methodNameStrings[] = {%(putFailedStrings)s};
-    fprintf(stderr, "putFailed: %%s\\n", methodNameStrings[v]);
+    PORTAL_PRINTF("putFailed: %%s\\n", methodNameStrings[v]);
     //exit(1);
-  }
+}
 '''
 
 responseSzCaseTemplate='''
     case %(channelNumber)s: 
-    { 
-        %(msg)s msg;
-        for (int i = (msg.size()/4)-1; i >= 0; i--) {
-            volatile unsigned int *ptr = (volatile unsigned int*)(((long)ind_fifo_base) + %(fifoOffset)s);
-            unsigned int val = READL(this, ptr);
-            buf[i] = val;
-        }
-        msg.demarshall(buf);
-        msg.indicate(this);
+        %(className)s%(methodName)s_demarshall(p);
         break;
-    }
+'''
+
+handleMessageTemplateDecl='''
+int %(namespace)s%(className)s_handleMessage(struct PortalInternal *p, unsigned int channel);
 '''
 
 handleMessageTemplate='''
-int %(namespace)s%(className)s::handleMessage(unsigned int channel)
+int %(namespace)s%(className)s_handleMessage(PortalInternal *p, unsigned int channel)
 {    
-    unsigned int buf[1024];
     static int runaway = 0;
     
     switch (channel) {
 %(responseSzCases)s
     default:
-        printf("%(namespace)s%(className)s::handleMessage: unknown channel 0x%%x\\n", channel);
+        PORTAL_PRINTF("%(namespace)s%(className)s_handleMessage: unknown channel 0x%%x\\n", channel);
         if (runaway++ > 10) {
-            printf("%(namespace)s%(className)s::handleMessage: too many bogus indications, exiting\\n");
+            PORTAL_PRINTF("%(namespace)s%(className)s_handleMessage: too many bogus indications, exiting\\n");
+#ifndef __KERNEL__
             exit(-1);
+#endif
         }
         return 0;
     }
@@ -149,70 +112,54 @@ int %(namespace)s%(className)s::handleMessage(unsigned int channel)
 }
 '''
 
+handleMessageTemplateCpp='''
+int %(namespace)s%(className)s::handleMessage(unsigned int channel)
+{
+    return %(namespace)s%(className)s_handleMessage(this, channel);
+}
+'''
+
+proxyMethodTemplateDecl='''
+void %(namespace)s%(className)s_%(methodName)s (struct PortalInternal *p %(paramSeparator)s %(paramDeclarations)s );
+'''
+
 proxyMethodTemplate='''
+void %(namespace)s%(className)s_%(methodName)s (PortalInternal *p %(paramSeparator)s %(paramDeclarations)s )
+{
+    %(className)s%(methodName)sPayload payload;
+%(paramSetters)s
+    %(className)s%(methodName)s_marshall(p, &payload);
+};
+'''
+
+proxyMethodTemplateCpp='''
 void %(namespace)s%(className)s::%(methodName)s ( %(paramDeclarations)s )
 {
-    %(className)s%(methodName)sMSG msg;
-    msg.channel = %(methodChannelOffset)s;
-    msg.fifo_offset = %(methodFifoOffset)s;
-%(paramSetters)s
-    sendMessage(&msg);
+    %(namespace)s%(className)s_%(methodName)s (this %(paramSeparator)s %(paramReferences)s );
 };
 '''
 
 msgTemplate='''
-class %(className)s%(methodName)sMSG : public PortalMessage
-{
-public:
-    struct {
+typedef struct {
 %(paramStructDeclarations)s
-    } payload;
-    size_t size(){return %(payloadSize)s;}
-    void marshall(unsigned int *buff) {
-        int i = 0;
-%(paramStructMarshall)s
-    }
-    void demarshall(unsigned int *buff){
-        int i = 0;
-%(paramStructDemarshall)s
-    }
-    void indicate(void *ind){ %(responseCase)s }
-};
+} %(className)s%(methodName)sPayload;
 '''
 
-
-
-def writeAndroidMk(cfiles, generatedCFiles, androidmkname, applicationmkname, xbsvdir, project_dir, silent=False):
-        f = util.createDirAndOpen(androidmkname, 'w')
-        substs = {
-            'cfiles': ' '.join([os.path.abspath(x) for x in cfiles]),
-	    'generatedCFiles': ' '.join(generatedCFiles),
-            'xbsvdir': xbsvdir,
-	    'project_dir': os.path.abspath(project_dir),
-	    'exe' : 'android_exe'
-        }
-        f.write(androidmk_template % substs)
-        f.close()
-        f = util.createDirAndOpen(applicationmkname, 'w')
-        f.write(applicationmk_template % substs)
-        f.close()
-
-def writeLinuxMk(base, linuxmkname, xbsvdir, sourcefiles, swProxies, swWrappers, clibs):
-        f = util.createDirAndOpen(linuxmkname, 'w')
-        className = cName(base)
-        substs = {
-            'ClassName': className,
-            'classname': className.lower(),
-            'xbsvdir': xbsvdir,
-	    'swProxies': ' '.join(['%sProxy.cpp' % p.name for p in swProxies]),
-	    'swWrappers': ' '.join(['%sWrapper.cpp' % w.name for w in swWrappers]),
-            'source': ' '.join([os.path.abspath(sf) for sf in sourcefiles]) if sourcefiles else '',
-            'sourceincludes': ' '.join(['-I%s' % os.path.dirname(os.path.abspath(sf)) for sf in sourcefiles]) if sourcefiles else '',
-	    'clibs': ' '.join(['-l%s' % l for l in clibs])
-        }
-        f.write(linuxmakefile_template % substs)
-        f.close()
-
+msgMarshallTemplate='''
+void %(className)s%(methodName)s_marshall(PortalInternal *p, %(className)s%(methodName)sPayload *payload) {
+    volatile unsigned int* addr = &(p->map_base[PORTAL_REQ_FIFO(%(methodChannelOffset)s)]);
+%(paramStructMarshall)s
+}
+'''
+msgDemarshallTemplate='''
+void %(className)s%(methodName)s_demarshall(PortalInternal *p){
+    %(className)s%(methodName)sPayload payload;
+    unsigned int tmp;
+    volatile unsigned int* addr = &(p->map_base[PORTAL_IND_FIFO(%(methodChannelOffset)s)]);
+%(paramStructDemarshall)s
+    %(responseCase)s
+}
+'''
 
 def indent(f, indentation):
     for i in xrange(indentation):
@@ -222,7 +169,7 @@ def capitalize(s):
     return '%s%s' % (s[0].upper(), s[1:])
 
 class NoCMixin:
-    def emitCDeclaration(self, f, indentation=0, namespace=''):
+    def emitCDeclaration(self, f, indentation, namespace):
         pass
     def emitCImplementation(self, f):
         pass
@@ -239,7 +186,7 @@ class MethodMixin:
             return int
     def formalParameters(self, params):
         return [ 'const %s%s %s' % (p.type.cName(), p.type.refParam(), p.name) for p in params]
-    def emitCDeclaration(self, f, proxy, indentation=0, namespace=''):
+    def emitCDeclaration(self, f, proxy, indentation, namespace):
         indent(f, indentation)
         resultTypeName = self.resultTypeName()
         if (not proxy):
@@ -252,29 +199,44 @@ class MethodMixin:
             f.write('= 0;\n')
         else:
             f.write(';\n')
-    def emitCImplementation(self, f, className, namespace, proxy):
+    def emitCStructDeclaration(self, f, of, namespace, className):
+        paramValues = ', '.join([p.name for p in self.params])
+        formalParams = self.formalParameters(self.params)
+        formalParams.insert(0, ' struct PortalInternal *p')
+        methodName = cName(self.name)
+        of.write('void %s%s_cb ( ' % (className, methodName))
+        of.write(', '.join(formalParams))
+        of.write(' );\n')
+        if methodName != putFailedMethodName:
+            f.write('\nvoid %s%s_cb ( ' % (className, methodName))
+            f.write(', '.join(formalParams))
+            f.write(' ) {\n')
+            indent(f, 4)
+            f.write(('((%s *)p)->%s ( ' % (className, methodName)) + paramValues + ');\n')
+            f.write('};\n')
+    def emitCImplementation(self, f, hpp, className, namespace, proxy, doCpp):
 
         # resurse interface types and flattening all structs into a list of types
         def collectMembers(scope, member):
             t = member.type
             tn = member.type.name
             if tn == 'Bit':
-                return [('%s.%s'%(scope,member.name),t)]
+                return [('%s%s'%(scope,member.name),t)]
             elif tn == 'Int' or tn == 'UInt':
-                return [('%s.%s'%(scope,member.name),t)]
+                return [('%s%s'%(scope,member.name),t)]
             elif tn == 'Float':
-                return [('%s.%s'%(scope,member.name),t)]
+                return [('%s%s'%(scope,member.name),t)]
             elif tn == 'Vector':
-                return [('%s.%s'%(scope,member.name),t)]
+                return [('%s%s'%(scope,member.name),t)]
             else:
                 td = syntax.globalvars[tn]
                 tdtype = td.tdtype
                 if tdtype.type == 'Struct':
-                    ns = '%s.%s' % (scope,member.name)
+                    ns = '%s%s.' % (scope,member.name)
                     rv = map(functools.partial(collectMembers, ns), tdtype.elements)
                     return sum(rv,[])
                 elif tdtype.type == 'Enum':
-                    return [('%s.%s'%(scope,member.name),tdtype)]
+                    return [('%s%s'%(scope,member.name),tdtype)]
                 else:
                     return self.collectMembers(scope, tdtype.type)
 
@@ -291,15 +253,15 @@ class MethodMixin:
             aw = a[1].bitWidth();
             #print '%d %d %d' %(aw, pro, w)
             if (aw-pro+w == 32):
-                ns = s+[(a[0],aw,pro,a[1],pro==0)]
+                ns = s+[(a[0],aw,pro,a[1],True)]
                 #print '%s (0)'% (a[0])
                 return [ns]+accumWords([],0,atoms[1:])
             if (aw-pro+w < 32):
-                ns = s+[(a[0],aw,pro,a[1],pro==0)]
+                ns = s+[(a[0],aw,pro,a[1],True)]
                 #print '%s (1)'% (a[0])
                 return accumWords(ns,0,atoms[1:])
             else:
-                ns = s+[(a[0],pro+(32-w),pro,a[1],pro==0)]
+                ns = s+[(a[0],pro+(32-w),pro,a[1],False)]
                 #print '%s (2)'% (a[0])
                 return [ns]+accumWords([],pro+(32-w), atoms)
 
@@ -307,7 +269,8 @@ class MethodMixin:
         paramDeclarations = self.formalParameters(params)
         paramStructDeclarations = [ '        %s %s%s;\n' % (p.type.cName(), p.name, p.type.bitSpec()) for p in params]
         
-        argAtoms = sum(map(functools.partial(collectMembers, 'payload'), params), [])
+        argAtoms = sum(map(functools.partial(collectMembers, 'payload.'), params), [])
+        argAtomsP = sum(map(functools.partial(collectMembers, 'payload->'), params), [])
 
         # for a in argAtoms:
         #     print a[0]
@@ -315,6 +278,8 @@ class MethodMixin:
 
         argAtoms.reverse();
         argWords  = accumWords([], 0, argAtoms)
+        argAtomsP.reverse();
+        argWordsP  = accumWords([], 0, argAtomsP)
 
         # for a in argWords:
         #     for b in a:
@@ -327,7 +292,7 @@ class MethodMixin:
             for e in w:
                 field = e[0];
 		if e[3].cName() == 'float':
-		    return '        buff[i++] = *(int*)&%s;\n' % e[0];
+		    return '        WRITEL(p, addr, *(int*)&%s; *dest_addr=tmp);\n' % e[0];
                 if e[2]:
                     field = '(%s>>%s)' % (field, e[2])
                 if off:
@@ -336,35 +301,45 @@ class MethodMixin:
                     field = '(const %s & std::bitset<%d>(0xFFFFFFFF)).to_ulong()' % (field, e[3].bitWidth())
                 word.append(field)
                 off = off+e[1]-e[2]
-            return '        buff[i++] = %s;\n' % (''.join(util.intersperse('|', word)))
+            return '        WRITEL(p, addr, %s);\n' % (''.join(util.intersperse('|', word)))
+
+
+
 
         def demarshall(w):
             off = 0
             word = []
+            word.append('        tmp = READL(p, addr);\n');
             for e in w:
                 # print e[0]+' (d)'
                 ass = '=' if e[4] else '|='
-                field = 'buff[i]'
+                field = 'tmp'
 		if e[3].cName() == 'float':
 		    word.append('        %s = *(float*)&(%s);\n'%(e[0],field))
 		    continue
                 if off:
                     field = '%s>>%s' % (field, off)
-                field = '((%s)&0x%xul)' % (field, ((1 << e[3].bitWidth())-1))
+                if e[3].bitWidth() < 32:
+                    field = '((%s)&0x%xul)' % (field, ((1 << e[3].bitWidth())-1))
                 if e[2]:
                     field = '((%s)(%s)<<%s)' % (e[3].cName(),field, e[2])
 		word.append('        %s %s (%s)(%s);\n'%(e[0],ass,e[3].cName(),field))
                 off = off+e[1]-e[2]
-            word.append('        i++;\n');
             # print ''
             return ''.join(word)
 
-        paramStructMarshall = map(marshall, argWords)
-        paramStructDemarshall = map(demarshall, argWords)
-
+        if argWords == []:
+            paramStructMarshall = ['        WRITEL(p, addr, 0);\n']
+            paramStructDemarshall = ['        tmp = READL(p, addr);\n']
+        else:
+            paramStructMarshall = map(marshall, argWordsP)
+            paramStructMarshall.reverse();
+            paramStructDemarshall = map(demarshall, argWords)
+            paramStructDemarshall.reverse();
+        
         if not params:
             paramStructDeclarations = ['        int padding;\n']
-        paramSetters = [ '    msg.payload.%s = %s;\n' % (p.name, p.name) for p in params]
+        paramSetters = [ '    payload.%s = %s;\n' % (p.name, p.name) for p in params]
         resultTypeName = self.resultTypeName()
         substs = {
             'namespace': namespace,
@@ -372,31 +347,39 @@ class MethodMixin:
             'methodName': cName(self.name),
             'MethodName': capitalize(cName(self.name)),
             'paramDeclarations': ', '.join(paramDeclarations),
+            'paramReferences': ', '.join([p.name for p in params]),
             'paramStructDeclarations': ''.join(paramStructDeclarations),
             'paramStructMarshall': ''.join(paramStructMarshall),
+            'paramSeparator': ',' if params != [] else '',
             'paramStructDemarshall': ''.join(paramStructDemarshall),
             'paramSetters': ''.join(paramSetters),
             'paramNames': ', '.join(['msg->%s' % p.name for p in params]),
             'resultType': resultTypeName,
             'methodChannelOffset': 'CHAN_NUM_%s_%s' % (className, cName(self.name)),
-            'methodFifoOffset': 'FIFO_OFFSET_%s_%s' % (className, cName(self.name)),
             # if message is empty, we still send an int of padding
             'payloadSize' : max(4, 4*((sum([p.numBitsBSV() for p in self.params])+31)/32)) 
             }
-        if (not proxy):
-            substs['responseCase'] = ('((%(className)s *)ind)->%(name)s(%(params)s);\n'
+        if (doCpp):
+            f.write(proxyMethodTemplateCpp % substs)
+        elif (not proxy):
+            respParams = ['payload.%s' % (p.name) for p in self.params]
+            respParams.insert(0, 'p')
+            substs['responseCase'] = ('%(className)s%(name)s_cb(%(params)s);\n'
                                       % { 'name': self.name,
                                           'className' : className,
-                                          'params': ', '.join(['payload.%s' % (p.name) for p in self.params])})
+                                          'params': ', '.join(respParams)})
             f.write(msgTemplate % substs)
+            f.write(msgDemarshallTemplate % substs)
         else:
-            substs['responseCase'] = 'assert(false);'
+            substs['responseCase'] = ''
             f.write(msgTemplate % substs)
+            f.write(msgMarshallTemplate % substs)
             f.write(proxyMethodTemplate % substs)
+            hpp.write(proxyMethodTemplateDecl % substs)
 
 
 class StructMemberMixin:
-    def emitCDeclaration(self, f, indentation=0, namespace=''):
+    def emitCDeclaration(self, f, indentation, namespace):
         indent(f, indentation)
         f.write('%s %s' % (self.type.cName(), self.name))
         if self.type.isBitField():
@@ -404,7 +387,7 @@ class StructMemberMixin:
         f.write(';\n')
 
 class TypeDefMixin:
-    def emitCDeclaration(self,f,indentation=0, namespace=''):
+    def emitCDeclaration(self,f,indentation, namespace):
         if self.tdtype.type == 'Struct' or self.tdtype.type == 'Enum':
             self.tdtype.emitCDeclaration(self.name,f,indentation,namespace)
 
@@ -413,19 +396,19 @@ class StructMixin:
         result = [self]
         result.append(self.elements)
         return result
-    def emitCDeclaration(self, name, f, indentation=0, namespace=''):
+    def emitCDeclaration(self, name, f, indentation, namespace):
         indent(f, indentation)
         if (indentation == 0):
             f.write('typedef ')
         f.write('struct %s {\n' % name)
         for e in self.elements:
-            e.emitCDeclaration(f, indentation+4)
+            e.emitCDeclaration(f, indentation+4, namespace)
         indent(f, indentation)
         f.write('}')
         if (indentation == 0):
             f.write(' %s;' % name)
         f.write('\n')
-    def emitCImplementation(self, f, className='', namespace=''):
+    def emitCImplementation(self, f, hpp, className='', namespace='', doCpp=False):
         pass
 
 class EnumElementMixin:
@@ -438,7 +421,7 @@ class EnumMixin:
     def collectTypes(self):
         result = [self]
         return result
-    def emitCDeclaration(self, name, f, indentation=0, namespace=''):
+    def emitCDeclaration(self, name, f, indentation, namespace):
         indent(f, indentation)
         if (indentation == 0):
             f.write('typedef ')
@@ -450,7 +433,7 @@ class EnumMixin:
         if (indentation == 0):
             f.write(' %s;' % name)
         f.write('\n')
-    def emitCImplementation(self, f, className='', namespace=''):
+    def emitCImplementation(self, f, hpp, className='', namespace='', doCpp=False):
         pass
     def bitWidth(self):
         return int(math.ceil(math.log(len(self.elements))))
@@ -466,11 +449,6 @@ class InterfaceMixin:
         subinterface = syntax.globalvars[subinterfaceName]
         #print 'subinterface', subinterface, subinterface
         return subinterface
-    def insertPutFailedMethod(self):
-        meth_name = putFailedMethodName
-        meth_type = AST.Type("Action",[])
-        meth_formal_params = [AST.Param("v", AST.Type("Bit",[AST.Type(32,[])]))]
-        self.decls = self.decls + [AST.Method(meth_name, meth_type, meth_formal_params)]
     def assignRequestResponseChannels(self, channelNumber=0):
         for d in self.decls:
             if d.__class__ == AST.Method:
@@ -489,30 +467,25 @@ class InterfaceMixin:
         className = "%s%s" % (cName(self.name), suffix)
         statusDecl = "%s%s *proxyStatus;" % (cName(self.name), 'ProxyStatus')
 	reqChanNums = []
-	reqFifoOffsets = []
         for d in self.decls:
-            reqChanNums.append('#define CHAN_NUM_%s %d\n' % (self.global_name(d.name, suffix), d.channelNumber))
-	for d in self.decls:
-            reqFifoOffsets.append('#define FIFO_OFFSET_%s (CHAN_NUM_%s * 256)\n' % (self.global_name(d.name, suffix), self.global_name(d.name, suffix)))
+            reqChanNums.append('CHAN_NUM_%s' % self.global_name(d.name, suffix))
         subs = {'className': className,
                 'namespace': namespace,
-		'statusDecl' : '' if self.hasPutFailed() else statusDecl,
+		'statusDecl' : '' if self.hasPutFailed() or suffix == 'WrapperStatus' else statusDecl,
                 'parentClass': self.parentClass('PortalInternal')}
+        if suffix != "WrapperStatus":
+            f.write("\nclass %s%s;\n" % (cName(self.name), 'ProxyStatus'))
         f.write(proxyClassPrefixTemplate % subs)
         for d in self.decls:
             d.emitCDeclaration(f, True, indentation + 4, namespace)
         f.write(proxyClassSuffixTemplate % subs)
-	of.write(''.join(reqChanNums))
-	of.write(''.join(reqFifoOffsets))
-    def emitCWrapperDeclaration(self, f, of, suffix, indentation=0, namespace=''):
+	of.write('enum { ' + ','.join(reqChanNums) + '};\n')
+    def emitCWrapperDeclaration(self, f, of, cppf, suffix, indentation=0, namespace=''):
         className = "%s%s" % (cName(self.name), suffix)
         indent(f, indentation)
 	indChanNums = []
-	indFifoOffsets = []
 	for d in self.decls:
-            indChanNums.append('#define CHAN_NUM_%s %d\n' % (self.global_name(cName(d.name), suffix),d.channelNumber));
-	for d in self.decls:
-            indFifoOffsets.append('#define FIFO_OFFSET_%s (CHAN_NUM_%s * 256)\n' % (self.global_name(d.name, suffix), self.global_name(d.name, suffix)))
+            indChanNums.append('CHAN_NUM_%s' % self.global_name(cName(d.name), suffix));
         subs = {'className': className,
                 'namespace': namespace,
                 'parentClass': self.parentClass('Portal')}
@@ -520,44 +493,55 @@ class InterfaceMixin:
         for d in self.decls:
             d.emitCDeclaration(f, False, indentation + 4, namespace)
         f.write(wrapperClassSuffixTemplate % subs)
-	of.write(''.join(indChanNums))
-	of.write(''.join(indFifoOffsets))
-    def emitCProxyImplementation(self, f,  suffix, namespace=''):
+        for d in self.decls:
+            d.emitCStructDeclaration(cppf, of, namespace, className)
+	of.write('enum { ' + ','.join(indChanNums) + '};\n')
+    def emitCProxyImplementation(self, f, hpp, suffix, namespace, doCpp):
         className = "%s%s" % (cName(self.name), suffix)
 	statusName = "%s%s" % (cName(self.name), 'ProxyStatus')
-	statusInstantiate = '' if self.hasPutFailed() else 'proxyStatus = new %s(this, poller);\n' % statusName
+	statusInstantiate = '' if self.hasPutFailed() or suffix == 'WrapperStatus' else 'proxyStatus = new %s(this, poller);\n' % statusName
         substitutions = {'namespace': namespace,
                          'className': className,
 			 'statusInstantiate' : statusInstantiate,
                          'parentClass': self.parentClass('PortalInternal')}
-        f.write(proxyConstructorTemplate % substitutions)
-        for d in self.decls:
-            d.emitCImplementation(f, className, namespace,True)
-    def emitCWrapperImplementation (self, f,  suffix, namespace=''):
+        if not doCpp:
+            for d in self.decls:
+                d.emitCImplementation(f, hpp, className, namespace,True, False)
+        else:
+            f.write(proxyConstructorTemplate % substitutions)
+            for d in self.decls:
+                d.emitCImplementation(f, hpp, className, namespace,True, True)
+    def emitCWrapperImplementation (self, f, hpp, suffix, namespace, doCpp):
         className = "%s%s" % (cName(self.name), suffix)
         emitPutFailed = self.hasPutFailed()
+        if not doCpp:
+            for d in self.decls:
+                d.emitCImplementation(f, hpp, className, namespace, False, False);
         substitutions = {'namespace': namespace,
                          'className': className,
 			 'putFailedMethodName' : putFailedMethodName,
                          'parentClass': self.parentClass('Portal'),
                          'responseSzCases': ''.join([responseSzCaseTemplate % { 'channelNumber': 'CHAN_NUM_%s' % self.global_name(cName(d.name), suffix),
-										'fifoOffset': 'FIFO_OFFSET_%s' % self.global_name(cName(d.name), suffix),
+                                                                                'className': className,
+                                                                                'methodName': cName(d.name),
                                                                                 'msg': '%s%sMSG' % (className, d.name)}
                                                      for d in self.decls 
                                                      if d.type == 'Method' and d.return_type.name == 'Action']),
                          'putFailedStrings': '' if (not emitPutFailed) else ', '.join('"%s"' % (d.name) for d in self.req.decls if d.__class__ == AST.Method )}
-        f.write(wrapperConstructorTemplate % substitutions)
-        for d in self.decls:
-            d.emitCImplementation(f, className, namespace, False);
-        if emitPutFailed:
-            f.write(putFailedTemplate % substitutions)
-        f.write(handleMessageTemplate % substitutions)
+        if not doCpp:
+            if emitPutFailed:
+                f.write(putFailedTemplate % substitutions)
+            f.write(handleMessageTemplate % substitutions)
+            hpp.write(handleMessageTemplateDecl % substitutions)
+        else:
+            f.write(wrapperConstructorTemplate % substitutions)
+            f.write(handleMessageTemplateCpp % substitutions)
 
 
 class ParamMixin:
     def cName(self):
         return self.name
-    def emitCDeclaration(self, f, indentation=0, namespace=''):
+    def emitCDeclaration(self, f, indentation, namespace):
         indent(f, indentation)
         f.write('s %s' % (self.type, self.name))
 
@@ -566,7 +550,7 @@ class TypeMixin:
         if (self.isBitField() and self.bitWidth() <= 64):
             return ''
         else:
-            return '&'
+            return ''
     def cName(self):
         cid = self.name
         cid = cid.replace(' ', '')

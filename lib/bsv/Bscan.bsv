@@ -23,138 +23,193 @@
 
 import FIFOF::*;
 import Clocks::*;
+import Vector::*;
 import BRAM::*;
 import BscanE2::*;
 import GetPut::*;
 import XilinxCells::*;
 import SyncBits::*;
 
-interface Bscan#(numeric type width);
-   interface Put#(Bit#(width)) capture;
-   interface Get#(Bit#(width)) update;
-endinterface
-
 // From: http://siliconexposed.blogspot.com/2013/10/soc-framework-part-5.html
 // Example usage: http://www.pld.ttu.ee/~vadim/tty/IAY0570/video_pipeline/psram_app/program_rom.v
 // Example usage: http://ohm.bu.edu/~dean/G-2TrackerWORKING/uart_test.vhd
 
-module mkBscan#(Integer bus)(Bscan#(width));
-   let width = valueOf(width);
+interface BscanTop;
+   interface Reset    rst;
+   interface Clock    tck;
+   method Bit#(1)     reset();
+   method Bit#(1)     capture();
+   method Bit#(1)     shift();
+   method Bit#(1)     tdi();
+   method Action      tdo(Bit#(1) v);
+   method Bit#(1)     update();
+   method Bool        first();
+endinterface
+`ifdef BSIM
+module mkBscanTop#(Integer bus)(BscanTop);
    Clock defaultClock <- exposeCurrentClock();
    Reset defaultReset <- exposeCurrentReset();
-
+   interface tck = defaultClock;
+   interface rst = defaultReset;
+   method tdi;
+       return 0;
+   endmethod
+   method tdo;
+       return 0;
+   endmethod
+   method capture;
+       return 0;
+   endmethod
+   method shift;
+       return 0;
+   endmethod
+   method update;
+       return 0;
+   endmethod
+   method first();
+      return 0;
+   endmethod
+endmodule
+`else
+module mkBscanTop#(Integer bus)(BscanTop);
+   Clock defaultClock <- exposeCurrentClock();
+   Reset defaultReset <- exposeCurrentReset();
    BscanE2 bscan <- mkBscanE2(bus);
-       // SEL := (IR == 'USERx')
-       // CAPTURE, RESET, RUNTEST, SHIFT, UPDATE: <name> := (TAP_state == <name>-DR)
-       // TCK, TDI, TDO := corresponding JTAG pins
-   Clock tck <- mkClockBUFG(clocked_by bscan.tck);
-   Reset rst <- mkAsyncReset(2, defaultReset, tck);
+   Clock mytck <- mkClockBUFG(clocked_by bscan.tck);
+   Reset myrst <- mkAsyncReset(2, defaultReset, mytck);
+   SyncBitIfc#(Bool) selected <- mkSyncBits(False, mytck, myrst, defaultClock, defaultReset);
+   Reg#(Bool) selectdelay <- mkReg(False);
 
-   Reg#(Bit#(width)) shiftReg <- mkReg(0, clocked_by tck, reset_by rst);
-   SyncFIFOIfc#(Bit#(width)) infifo <- mkSyncFIFO(2, defaultClock, defaultReset, tck);
-   SyncFIFOIfc#(Bit#(width)) outfifo <- mkSyncFIFO(2, tck, rst, defaultClock);
-
-   rule captureRule if (bscan.capture() == 1 && bscan.sel() == 1);
-      if (infifo.notEmpty()) begin
-	 //shiftReg <= tagged Valid infifo.first();
-	 infifo.deq();
-      end
-      //else
-      //shiftReg <= 0;
+   rule updater;
+       selected.send(bscan.sel() == 1);
    endrule
-   rule shift if (bscan.shift() == 1 && bscan.sel() == 1);
-      bscan.tdo(shiftReg[0]);
-      let v = (shiftReg >> 1);
-      v[width-1] = bscan.tdi();
-      shiftReg <= v;
-   endrule
-   rule updateRule if (bscan.update() == 1 && bscan.sel() == 1);
-      //if (outfifo.notFull()) begin
-      //outfifo.enq(shiftReg);
-      //end
+   rule writed;
+       selectdelay <= selected.read();
    endrule
 
-   interface Put capture = toPut(infifo);
-   interface Get update = toGet(outfifo);
+   interface tck = mytck;
+   interface rst = myrst;
+   method tdi = bscan.tdi;
+   method tdo = bscan.tdo;
+   method capture;
+       return bscan.sel & bscan.capture;
+   endmethod
+   method shift;
+       return bscan.sel & bscan.shift;
+   endmethod
+   method update;
+       return bscan.sel & bscan.update;
+   endmethod
+   method first();
+      return selected.read() && !selectdelay;
+   endmethod
+endmodule
+`endif
+
+interface BscanLocal;
+   interface Vector#(2, BscanTop) loc;
+endinterface
+
+module mkBscanLocal#(BscanTop bscan)(BscanLocal);
+   Vector#(2, Wire#(Bit#(1))) tdo_wire <- replicateM(mkDWire(0));
+   //Wire#(Bit#(1)) tdo_wire2 <- mkDWire(0);
+
+   rule tdo_rule;
+       bscan.tdo(tdo_wire[0] | tdo_wire[1]);
+   endrule
+   Vector#(2, BscanTop) vloc;
+   for (Integer i = 0; i < 2; i = i + 1) begin
+     vloc[i] =
+      (interface BscanTop;
+         method rst = bscan.rst;
+         method tck = bscan.tck;
+         method reset = bscan.reset;
+         method capture = bscan.capture;
+         method shift = bscan.shift;
+         method tdi = bscan.tdi;
+         method update = bscan.update;
+         method first = bscan.first;
+         method Action tdo(Bit#(1) v);
+             tdo_wire[i] <= v;
+         endmethod
+      endinterface);
+   end
+   interface loc = vloc;
 endmodule
 
 interface BscanBram#(type atype, type dtype);
-   interface Clock jtagClock;
-   interface Reset jtagReset;
    interface BRAMClient#(atype, dtype) bramClient;
-   method Bit#(4) debug;
+   method Bit#(1) data_out();
 endinterface
 
-module mkBscanBram#(Integer bus, atype addr)(BscanBram#(atype, dtype))
-   provisos (Bits#(atype, asz), Bits#(dtype,dsz));
+module mkBscanBram#(Integer id, atype addr, BscanTop bscan)(BscanBram#(atype, dtype))
+   provisos (Bits#(atype, asz), Bits#(dtype,dsz), Add#(1, a__, dsz));
    let asz = valueOf(asz);
    let dsz = valueOf(dsz);
 
    Clock defaultClock <- exposeCurrentClock();
    Reset defaultReset <- exposeCurrentReset();
 
-   BscanE2 bscan <- mkBscanE2(bus);
-   Clock tck <- mkClockBUFG(clocked_by bscan.tck);
-   Reset rst <- mkAsyncReset(2, defaultReset, tck);
-   SyncBitIfc#(Bit#(asz)) addr_jtag <- mkSyncBits(0, defaultClock, defaultReset, tck, rst);
-   Wire#(Maybe#(BRAMRequest#(atype, dtype))) requestWire <- mkDWire(tagged Invalid, clocked_by tck, reset_by rst);
-   Wire#(Maybe#(dtype)) responseWire <- mkDWire(tagged Invalid, clocked_by tck, reset_by rst);
+   Reg#(Bit#(asz)) addrReg <- mkReg(0);
+   Reg#(Bool) readData <- mkReg(False);
+   Reg#(Bool) firstItem <- mkReg(False);
+   Reg#(Bool) selected <- mkReg(False);
+   SyncBitIfc#(Bool) selectedj <- mkSyncBits(False, defaultClock, defaultReset, bscan.tck, bscan.rst);
 
-   Reg#(Bit#(dsz)) shiftReg <- mkReg(0, clocked_by tck, reset_by rst);
-   Reg#(Bit#(asz)) addrReg <- mkReg(0, clocked_by tck, reset_by rst);
-   Reg#(Bool) capture_delay <- mkReg(False, clocked_by tck, reset_by rst);
-   Reg#(Bool) selected_delay <- mkReg(False, clocked_by tck, reset_by rst);
+   Reg#(Bit#(dsz)) shiftReg <- mkReg(0, clocked_by bscan.tck, reset_by bscan.rst);
+   SyncBitIfc#(Bit#(dsz)) tojtag <- mkSyncBits(0, defaultClock, defaultReset, bscan.tck, bscan.rst);
+   SyncBitIfc#(Bit#(dsz)) fromjtag <- mkSyncBits(0, bscan.tck, bscan.rst, defaultClock, defaultReset);
+   SyncPulseIfc startWrite <- mkSyncHandshake(bscan.tck, bscan.rst, defaultClock);
 
-   rule selected_rule;
-       selected_delay <= bscan.sel() == 1;
-       capture_delay <= bscan.sel() == 1 && bscan.capture() == 1;
+   rule captureRule if(bscan.capture() == 1);
+       shiftReg <= tojtag.read();
+   endrule
+   rule shiftRule if (bscan.shift() == 1);
+       shiftReg <= { bscan.tdi(), shiftReg[dsz-1:1] };
+   endrule
+   rule updateRule if(bscan.update() == 1);
+       startWrite.send();
+       fromjtag.send(shiftReg);
    endrule
 
-   rule addr_clock_crossing;
-       addr_jtag.send(pack(addr));
+   rule firstRule if (bscan.first());
+       firstItem <= True;
+       selected <= False;
+       selectedj.send(False);
+       tojtag.send(0);
    endrule
-
-   rule reset_addr if (bscan.sel() == 1 && !selected_delay);
-       addrReg <= addr_jtag.read();  // first time USER1 selected, reset address
-   endrule
-
-   rule captureRule if (bscan.sel() == 1 && bscan.capture() == 1);
-       requestWire <= tagged Valid BRAMRequest {write:False, responseOnWrite:False, address:unpack(addrReg), datain:?};
-   endrule
-
-   rule shiftrule if (bscan.sel() == 1 && bscan.shift() == 1);
-       Bit#(dsz) shift = shiftReg;
-       if (capture_delay) begin
-	  Maybe#(dtype) m = responseWire;
-	  let d = fromMaybe(unpack(0), m);
-	  shift = pack(d);
+   rule addrRule if (startWrite.pulse());
+       let v = fromInteger(0);  // first time USER1, reset address
+       if (firstItem) begin
+           selected <= fromjtag.read() == fromInteger(id);
+           selectedj.send(fromjtag.read() == fromInteger(id));
        end
-       bscan.tdo(shift[0]);
-       let v = (shift >> 1);
-       v[dsz-1] = bscan.tdi();
-       shiftReg <= v;
+       else
+           v = addrReg + 1;
+       addrReg <= v;
+       firstItem <= False;
+   endrule
+   rule readdataRule;
+       readData <= startWrite.pulse();
    endrule
 
-   rule updateRule if (bscan.sel() == 1 && bscan.update() == 1 && bscan.capture() == 0);
-       requestWire <= tagged Valid (BRAMRequest {write:True, responseOnWrite:False, address:unpack(addrReg), datain:unpack(shiftReg)});
-       addrReg <= addrReg + 1;
-   endrule
-
-   method Bit#(4) debug;
-       return {bscan.sel(), bscan.capture(), bscan.shift(), bscan.update()};
-   endmethod
    interface BRAMClient bramClient;
       interface Get request;
-	 method ActionValue#(BRAMRequest#(atype,dtype)) get() if (requestWire matches tagged Valid .req);
-	    return req;
+	 method ActionValue#(BRAMRequest#(atype,dtype)) get() if ((selected && startWrite.pulse()) || readData);
+            return BRAMRequest {write:!readData, responseOnWrite:False, address:unpack(addrReg), datain:unpack(fromjtag.read())};
 	 endmethod
       endinterface
       interface Put response;
 	 method Action put(dtype d);
-	    responseWire <= tagged Valid d;
+            tojtag.send(pack(d));
 	 endmethod
       endinterface
    endinterface
-   interface Clock jtagClock = tck;
-   interface Reset jtagReset = rst;
+   method Bit#(1) data_out();
+      // the output lines are all OR'ed together when going back to the BSCAN core
+      if (selectedj.read())
+          return shiftReg[0];
+      else
+          return 0;
+   endmethod
 endmodule

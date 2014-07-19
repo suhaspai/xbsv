@@ -35,76 +35,74 @@ BOARD=zedboard
 parsetab.py: syntax.py
 	python syntax.py
 
-test: test-echo/ztop_1.bit.bin.gz test-memcpy/ztop_1.bit.bin.gz test-hdmi/hdmidisplay.bit.bin.gz
+#################################################################################################
+# tests
+
+memtests =  memread_manyclients  \
+            memwrite_manyclients 
+
+matrixtests =testmm2.2.2         \
+	    testmm4.2.2          \
+	    testmm4.4.2          \
+	    testmm4.4.4          \
+	    testmm8.8.2          \
+	    testmm8.8.4          \
+	    testmm16.16.2        \
+	    testmm16.16.4        
+
+tests    =  $(memtests)          \
+	    $(matrixtests)       \
+	    memread_manual       \
+	    simple_manual
 
 #################################################################################################
-# Generate bsim and zynq make targets for each test in testnames.
-# For test 'foo', we will generate 'foo.bits' and 'foo.bsim'
+# examples
 
-testnames = echo             \
-	    hdmidisplay      \
-            memcpy_buff      \
-            memcpy_buff_oo   \
-            memcpy_nobuff    \
-            memread_buff_oo  \
-            memread_buff     \
-            memread_nobuff   \
-	    memwrite_buff    \
-	    memwrite_buff_oo \
-	    memwrite_nobuff  \
-            memrw_buff       \
-            memrw_nobuff     \
-            memread128       \
-            memread2         \
-            mempoke          \
-            pcietestbench    \
-            pcietestbench_dma_io  \
-            pcietestbench_dma_oo  \
-            pipe_mul         \
-            pipe_mul2        \
-            printf           \
-            simple           \
-            strstr           \
-	    ring             \
-	    perf             \
-	    nandsim          \
-            flowcontrol      \
-            bluescope        \
-	    splice           \
-	    maxcommonsubseq  \
-	    smithwaterman    \
-	    serialconfig     \
-	    fib              \
-	    xsim-echo        \
-	    imageon          \
-	    imageonfb        \
-            bscan            \
-            memread_nobuff_4m\
-            memwrite_nobuff_4m\
-            memcpy_buff_4m\
+examples =  echo                 \
+	    hdmidisplay          \
+            memcpy               \
+            memlatency           \
+            memread              \
+	    memwrite             \
+            memrw                \
+            memread128           \
+            memread2             \
+            pipe_mul             \
+            pipe_mul2            \
+            printf               \
+            simple               \
+            strstr               \
+	    ring                 \
+	    perf                 \
+	    nandsim              \
+            flowcontrol          \
+            bluescope            \
+	    splice               \
+	    maxcommonsubseq      \
+	    smithwaterman        \
+	    serialconfig         \
+	    noc                  \
+	    noc2d                \
+	    fib                  \
+	    xsim-echo            \
+	    imageon              \
+	    imageonfb            \
+	    fmcomms1		 \
+            bscan                \
+            memread_4m           \
+            memwrite_4m          \
+	    testmm               \
+            yuv                  
 
-oo_memtests =  memcpy_buff_oo\
-            memread_buff_oo  \
-            memwrite_buff_oo \
+memexamples =  memcpy            \
+            memread              \
+	    memwrite             \
+            memrw                \
+	    memread2             
 
-
-memtests =  memcpy_buff      \
-            memcpy_nobuff    \
-            memread_buff     \
-            memread_nobuff   \
-	    memwrite_buff    \
-	    memwrite_nobuff  \
-            memrw_buff       \
-            memrw_nobuff     \
-	    memread2         \
-            echo             \
-
-
-zmemtests = memread_nobuff_4m\
-            memwrite_nobuff_4m\
-            memcpy_buff_4m\
-            memtests
-
+zmemexamples = memread_4m        \
+            memwrite_4m          \
+            $(memexamples)        
 
 #################################################################################################
 # gdb
@@ -113,182 +111,202 @@ zmemtests = memread_nobuff_4m\
 	make XBSV_DEBUG=1 $*
 
 #################################################################################################
-# bsim
+# bluesim
 
-bsimtests = $(addsuffix .bsim, $(testnames))
-bsimtests: $(bsimtests)
-
-$(bsimtests):
-	rm -fr examples/$(basename $@)/bluesim
-	make BOARD=bluesim -C examples/$(basename $@) bsim_exe bsim
+bluesimtests = $(addprefix examples/, $(addsuffix .bluesim, $(examples))) \
+	       $(addprefix tests/, $(addsuffix .bluesim, $(tests)))
+bluesimtests: $(bluesimtests)
 
 
-bsimruns = $(addsuffix .bsimrun, $(testnames))
-bsimruns: $(bsimruns)
+$(bluesimtests):
+	rm -fr $(basename $@)/bluesim
+	make BOARD=bluesim -C $(basename $@) bsim_exe bsim
 
-$(bsimruns):
-	(cd examples/$(basename $@)/bluesim; make run)
+
+bluesimruns = $(addprefix examples/, $(addsuffix .bluesimrun, $(examples))) \
+	      $(addprefix tests/, $(addsuffix .bluesimrun, $(tests)))
+bluesimruns: $(bluesimruns)
+
+$(bluesimruns):
+	(cd $(basename $@)/bluesim; make run)
 
 #################################################################################################
 # xsim
 
-xsimtests = $(addsuffix .xsim, $(testnames))
+xsimtests = $(addprefix examples/, $(addsuffix .xsim, $(examples))) \
+	    $(addprefix tests/, $(addsuffix .xsim, $(tests)))
 xsimtests: $(xsimtests)
 
 $(xsimtests):
-	rm -fr examples/$(basename $@)/bluesim
-	make BOARD=bluesim -C examples/$(basename $@) xsim
+	rm -fr $(basename $@)/bluesim
+	make BOARD=bluesim -C $(basename $@) xsim
 
-xsimruns = $(addsuffix .xsimrun, $(testnames))
+xsimruns = $(addprefix examples/, $(addsuffix .xsimrun, $(examples))) \
+	   $(addprefix tests/, $(addsuffix .xsimrun, $(tests)))
 xsimruns: $(xsimruns)
 
 $(xsimruns):
-	make BOARD=bluesim -C examples/$(basename $@) xsimrun
+	make BOARD=bluesim -C $(basename $@) xsimrun
 
 #################################################################################################
 # zedboard
 
-zedtests = $(addsuffix .zedboard, $(testnames))
+zedtests = $(addprefix examples/, $(addsuffix .zedboard, $(examples))) \
+	   $(addprefix tests/, $(addsuffix .zedboard, $(tests)))
 zedtests: $(zedtests)
 
 $(zedtests):
-	rm -fr examples/$(basename $@)/zedboard
-	make BOARD=zedboard -C examples/$(basename $@) all
+	rm -fr $(basename $@)/zedboard
+	make BOARD=zedboard -C $(basename $@) all
 
-zedboardruns = $(addsuffix .zedboardrun, $(testnames))
+zedboardruns = $(addprefix examples/, $(addsuffix .zedboardrun, $(examples))) \
+	       $(addprefix tests/, $(addsuffix .zedboardrun, $(tests)))
 zedboardruns: $(zedboardruns)
 
 # RUNPARAM=ipaddr is an optional argument if you already know the IP of the zedboard
 $(zedboardruns):
-	scripts/run.zedboard `find examples/$(basename $@)/zedboard -name \*.gz` `find examples/$(basename $@)/zedboard -name android_exe | grep libs`
+	scripts/run.zedboard $(basename $@)/zedboard/bin/*bin.gz `find $(basename $@)/zedboard -name android_exe | grep libs`
 
 
 #################################################################################################
 # zc702
 
-zctests = $(addsuffix .zc702, $(testnames))
+zctests = $(addprefix examples/, $(addsuffix .zc702, $(examples))) \
+	  $(addprefix tests/, $(addsuffix .zc702, $(tests)))
 zctests: $(zctests)
 
 $(zctests):
-	rm -fr examples/$(basename $@)/zc702
-	make BOARD=zc702 -C examples/$(basename $@) all
+	rm -fr $(basename $@)/zc702
+	make BOARD=zc702 -C $(basename $@) all
 
-zc702runs = $(addsuffix .zc702run, $(testnames))
+zc702runs = $(addprefix examples/, $(addsuffix .zc702run, $(examples))) \
+	    $(addprefix tests/, $(addsuffix .zc702run, $(tests)))
 zc702runs: $(zc702runs)
 
 # RUNPARAM=ipaddr is an optional argument if you already know the IP of the zc702
 $(zc702runs):
-	scripts/run.zedboard `find examples/$(basename $@)/zc702 -name \*.gz` `find examples/$(basename $@)/zc702 -name android_exe | grep libs`
+	scripts/run.zedboard $(basename $@)/zc702/bin/*bin.gz `find $(basename $@)/zedboard -name android_exe | grep libs`
 
 #################################################################################################
 # zc706
 
-zc706tests = $(addsuffix .zc706, $(testnames))
+zc706tests = $(addprefix examples/, $(addsuffix .zc706, $(examples))) \
+	     $(addprefix tests/, $(addsuffix .zc706, $(tests)))
 zc706tests: $(zc706tests)
 
 $(zc706tests):
-	rm -fr examples/$(basename $@)/zc706
-	make BOARD=zc706 -C examples/$(basename $@) all
+	rm -fr $(basename $@)/zc706
+	make BOARD=zc706 -C $(basename $@) all
 
-zc706runs = $(addsuffix .zc706run, $(testnames))
+zc706runs = $(addprefix examples/, $(addsuffix .zc706run, $(examples))) \
+	    $(addprefix tests/, $(addsuffix .zc706run, $(tests)))
 zc706runs: $(zc706runs)
 
 # RUNPARAM=ipaddr is an optional argument if you already know the IP of the zc706
 $(zc706runs):
-	scripts/run.zedboard `find examples/$(basename $@)/zc706 -name \*.gz` `find examples/$(basename $@)/zc706 -name android_exe | grep libs`
+	scripts/run.zedboard $(basename $@)/zc706/bin/*bin.gz `find $(basename $@)/zedboard -name android_exe | grep libs`
 
 #################################################################################################
 # vc707
 
-vc707tests = $(addsuffix .vc707, $(testnames))
+vc707tests = $(addprefix examples/, $(addsuffix .vc707, $(examples))) \
+	     $(addprefix tests/, $(addsuffix .vc707, $(tests)))
 vc707tests: $9vc707tests)
 
 $(vc707tests):
-	rm -fr examples/$(basename $@)/vc707
-	make BOARD=vc707 -C examples/$(basename $@) all
+	rm -fr $(basename $@)/vc707
+	make BOARD=vc707 -C $(basename $@) all
 
-vc707runs = $(addsuffix .vc707run, $(testnames))
+vc707runs = $(addprefix examples/, $(addsuffix .vc707run, $(examples))) \
+	    $(addprefix tests/, $(addsuffix .vc707run, $(tests)))
 vc707runs: $(vc707runs)
 
 $(vc707runs):
-	(cd examples/$(basename $@)/vc707; make program)
-	timeout 3m catchsegv examples/$(basename $@)/vc707/jni/mkpcietop
+	scripts/run.pcietest $(basename $@)/vc707/bin/mk*.bin.gz $(basename $@)/vc707/bin/mkpcietop
 
 #################################################################################################
 # kc705
 
-kc705tests = $(addsuffix .kc705, $(testnames))
+kc705tests = $(addprefix examples/, $(addsuffix .kc705, $(examples))) \
+	     $(addprefix tests/, $(addsuffix .kc705, $(tests)))
 kc705tests: $(kc705tests)
 
 $(kc705tests):
-	rm -fr examples/$(basename $@)/kc705
-	make BOARD=kc705 -C examples/$(basename $@) all
+	rm -fr $(basename $@)/kc705
+	make BOARD=kc705 -C $(basename $@) all
 
-kc705runs = $(addsuffix .kc705run, $(testnames))
+kc705runs = $(addprefix examples/, $(addsuffix .kc705run, $(examples))) \
+	    $(addprefix tests/, $(addsuffix .kc705run, $(tests)))
 kc705runs: $(kc705runs)
 
 $(kc705runs):
-	scripts/run.pcietest examples/$(basename $@)/kc705/hw/mk*.bin examples/$(basename $@)/kc705/jni/mkpcietop
+	scripts/run.pcietest $(basename $@)/kc705/bin/mk*.bin.gz $(basename $@)/kc705/bin/mkpcietop
 
 
 #################################################################################################
-# memtests
+# memexamples
 
-memtests.zedboard: $(addsuffix .zedboard, $(memtests))
+memexamples.zedboard: $(addprefix examples/, $(addsuffix .zedboard, $(memexamples)))
 
-memtests.kc705: $(addsuffix .kc705, $(memtests))
+memexamples.kc705: $(addprefix examples/, $(addsuffix .kc705, $(memexamples)))
+memexamples.kc705run: $(addprefix examples/, $(addsuffix .kc705run, $(memexamples)))
 
-memtests.bsim: $(addsuffix .bsim, $(memtests))
+memexamples.bluesim: $(addprefix examples/, $(addsuffix .bluesim, $(memexamples)))
 
-memtests.bsimrun: $(addsuffix .bsimrun, $(memtests))
-
-#################################################################################################
-# zmemtests
-
-zmemtests.zedboard: $(addsuffix .zedboard, $(zmemtests))
-
-zmemtests.bsim: $(addsuffix .bsim, $(zmemtests))
-
-zmemtests.bsimrun: $(addsuffix .bsimrun, $(zmemtests))
+memexamples.bluesimrun: $(addprefix examples/, $(addsuffix .bluesimrun, $(memexamples)))
 
 #################################################################################################
-# oo_memtests
+# zmemexamples
 
-oo_memtests.zedboard: $(addsuffix .zedboard, $(oo_memtests))
+zmemexamples.zedboard: $(addprefix examples/, $(addsuffix .zedboard, $(zmemexamples)))
 
-oo_memtests.kc705: $(addsuffix .kc705, $(oo_memtests))
+zmemexamples.bluesim: $(addprefix examples/, $(addsuffix .bluesim, $(zmemexamples)))
 
-oo_memtests.bsim: $(addsuffix .bsim, $(oo_memtests))
+zmemexamples.bluesimrun: $(addprefix examples/, $(addsuffix .bluesimrun, $(zmemexamples)))
 
-oo_memtests.bsimrun: $(addsuffix .bsimrun, $(oo_memtests))
+#################################################################################################
+# tests
+
+tests.bluesim:  $(addprefix tests/, $(addsuffix .bluesim, $(tests)))
+tests.bluesimrun:  $(addprefix tests/, $(addsuffix .bluesimrun, $(tests)))
+tests.kc705:  $(addprefix tests/, $(addsuffix .kc705, $(tests)))
+tests.vc707:  $(addprefix tests/, $(addsuffix .vc707, $(tests)))
+
+#################################################################################################
+# matrixtests
+
+matrixtests.bluesim:  $(addprefix tests/, $(addsuffix .bluesim, $(matrixtests)))
+matrixtests.bluesimrun:  $(addprefix tests/, $(addsuffix .bluesimrun, $(matrixtests)))
+matrixtests.kc705:  $(addprefix tests/, $(addsuffix .kc705, $(matrixtests)))
+matrixtests.vc707:  $(addprefix tests/, $(addsuffix .vc707, $(matrixtests)))
 
 #################################################################################################
 # misc
 
-android_exetests = $(addsuffix .android_exe, $(testnames))
+android_exetests = $(addprefix examples/, $(addsuffix .android_exe, $(examples)))
 android_exetests: $(android_exetests)
 
 $(android_exetests):
-	make BOARD=zedboard -C examples/$(basename $@) android_exe
+	make BOARD=zedboard -C $(basename $@) android_exe
 
-ubuntu_exetests = $(addsuffix .ubuntu_exe, $(testnames))
+ubuntu_exetests = $(addprefix examples/, $(addsuffix .ubuntu_exe, $(examples)))
 ubuntu_exetests: $(ubuntu_exetests)
 
 $(ubuntu_exetests):
-	make BOARD=zedboard -C examples/$(basename $@) ubuntu_exe
+	make BOARD=zedboard -C $(basename $@) ubuntu_exe
 
-ac701tests = $(addsuffix .ac701, $(testnames))
+ac701tests = $(addprefix examples/, $(addsuffix .ac701, $(examples)))
 ac701tests: $(ac701tests)
 
 $(ac701tests):
-	rm -fr examples/$(basename $@)/ac701
-	make BOARD=ac701 -C examples/$(basename $@) all
+	rm -fr $(basename $@)/ac701
+	make BOARD=ac701 -C $(basename $@) all
 
-ac701runs = $(addsuffix .ac701run, $(testnames))
+ac701runs = $(addprefix examples/, $(addsuffix .ac701run, $(examples)))
 ac701runs: $(ac701runs)
 
 $(ac701runs):
-	scripts/run.pcietest examples/$(basename $@)/ac701/hw/mk*.bin examples/$(basename $@)/ac701/jni/mkpcietop
+	scripts/run.pcietest $(basename $@)/ac701/bin/mk*.bin.gz $(basename $@)/ac701/bin/mkpcietop
 
 zynqdrivers:
 	(cd drivers/zynqportal/; DEVICE_XILINX_KERNEL=`pwd`/../../../device_xilinx_kernel/ make zynqportal.ko)

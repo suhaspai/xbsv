@@ -70,14 +70,14 @@ last_vcd_timestamp = mpz(0)
 last_vcd_pktclass_code = None
 
 pktclassCodes = {
-    'SReq': 'S',
-    'SWReq': 'T',
-    'SResp': 's',
-    'slave continuation': 'c',
-    'MWReq': 'W',
-    'MReq': 'M',
-    'MResp': 'm',
-    'master continuation': 'C',
+    'CpuRReq': 'S',
+    'CpuWReq': 'T',
+    'CpuRResp': 's',
+    '(to) slave continuation': 'c',
+    'DmaWReq': 'W',
+    'DmaRReq': 'M',
+    'DmaRResp': 'm',
+    '(to) master continuation': 'C',
     'trace': 't',
 }
 
@@ -138,25 +138,25 @@ def pktClassification(tlpsof, tlpeof, tlpbe, pktformat, pkttype, portnum):
         return 'trace'
     if tlpsof == 0:
         if portnum == 4:
-            return 'MCont'
+            return '(to) master continuation'
         else:
-            return 'SCont'
+            return '(to) slave continuation'
     if portnum == 4:
         if pkttype == 10: # COMPLETION
-            return 'MResp'
+            return 'DmaRResp'
         else:
             if pktformat == 2 or pktformat == 3:
-                return 'SWReq'
+                return 'CpuWReq'
             else:
-                return 'SReq'
+                return 'CpuRReq'
     elif portnum == 8:
         if pkttype == 10: # COMPLETION
-            return 'SResp'
+            return 'CpuRResp'
         else:
             if pktformat == 2 or pktformat == 3:
-                return 'MWReq'
+                return 'DmaWReq'
             else:
-                return 'MReq'
+                return 'DmaRReq'
     else:
         return 'Misc'
 
@@ -268,7 +268,7 @@ def print_tlp(tlpdata, f=None):
         sys.exit(1)
     last_seqno = seqno
 
-def print_tlp_log(tlplog, f=None):
+def print_tlp_log(tlplog, f=None, lf=None):
     if f:
         emit_vcd_header(f)
     #ts     delta           response   foo XXX tlp(be hit eof sof) pkttype format             address  off be(1st last) tag req clid stat nosnoop bcnt laddr length data 
@@ -277,6 +277,8 @@ def print_tlp_log(tlplog, f=None):
     for tlpdata in tlplog:
         if tlpdata.startswith('00000000') or tlpdata == '':
             continue
+        if lf:
+            lf.write(tlpdata+'\n')
         print_tlp(tlpdata, f)
 
 if __name__ == '__main__':
@@ -285,7 +287,10 @@ if __name__ == '__main__':
     else:
         tlplog = subprocess.check_output(['xbsvutil', 'tlp', '/dev/fpga0']).split('\n')
     tlplog.sort()
+    lf = open('tlp.log', 'w')
     f = open('tlp.vcd', 'w')
-    print_tlp_log(tlplog[0:-1], f)
+    print_tlp_log(tlplog[0:-1], f, lf)
     print classCounts
     print sum([ classCounts[k] for k in classCounts])
+    f.close()
+    lf.close()

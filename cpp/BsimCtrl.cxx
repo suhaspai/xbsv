@@ -34,114 +34,71 @@
 
 #include "sock_utils.h"
 
-static struct portal portals[16] = {iport,iport,iport,iport,iport,iport,
-				    iport,iport,iport,iport,iport,iport,
-				    iport,iport,iport,iport};
+static struct {
+    struct channel p_read;
+    struct channel p_write;
+} portals[16];
 
-struct queuestatus{
-  struct memrequest req;
-  unsigned int pnum;
-  bool valid;
-  bool inflight;
-};
+typedef struct {
+    struct memrequest req;
+    unsigned int pnum;
+    int valid;
+    int inflight;
+} HEAD_TYPE;
+static HEAD_TYPE headarr[2]; /* 0 -> read; 1 -> write */
 
-static struct queuestatus  read_head = {{},0,false,false,};
-static struct queuestatus write_head = {{},0,false,false,};
+extern "C" {
+  void initPortal(unsigned long id){
+    thread_socket(&portals[id].p_read, "fpga%ld_rc", id);
+    thread_socket(&portals[id].p_write, "fpga%ld_wc", id);
+  }
 
-static void recv_request(bool rr)
-{
-  struct queuestatus* head = rr ? &read_head : &write_head;
-  if (!head->valid && !head->inflight){
-    for(int i = 0; i < 16; i++){
-      struct channel* chan = rr ? &(portals[i].read) : &(portals[i].write);
-      if(chan->connected){
-	int rv = recv(chan->s2, &(head->req), sizeof(memrequest), MSG_DONTWAIT);
+  bool processReq32(uint32_t rr){
+    HEAD_TYPE *head = &headarr[rr];
+    if (!head->valid && !head->inflight){
+      for(int i = 0; i < 16; i++){
+	struct channel* chan = rr ? &(portals[i].p_write) : &(portals[i].p_read);
+	int rv = recv(chan->sockfd, &head->req, sizeof(memrequest), MSG_DONTWAIT);
 	if(rv > 0){
 	  //fprintf(stderr, "recv size %d\n", rv);
 	  assert(rv == sizeof(memrequest));
 	  head->pnum = i;
-	  head->valid = true;
-	  head->inflight = rr ? false : true;
+	  head->valid = 1;
+	  head->inflight = rr;
 	  head->req.addr = (unsigned int *)(((long) head->req.addr) | i << 16);
 	  if(0)
-	  fprintf(stderr, "recv_request(i=%d,rr=%d) {write=%d, addr=%08lx, data=%08x}\n", 
-		  i, rr, head->req.write, (long)head->req.addr, head->req.data);
+	  fprintf(stderr, "processReq32(i=%d,rr=%d) {write=%d, addr=%08lx, data=%08x}\n", 
+		  i, rr, head->req.write_flag, (long)head->req.addr, head->req.data);
 	  break;
 	}
       }
     }
-  } else {
-    //fprintf(stderr, "blocked %d %d %d\n", head->pnum, head->valid, head->inflight);
-  }
-}
-
-extern "C" {
-  void initPortal(unsigned long id){
-
-
-    pthread_t tid;
-    struct channel* rc;
-    struct channel* wc;
-
-    assert(id < 16);    
-
-    rc = &(portals[id].read);
-    wc = &(portals[id].write);
-    
-    snprintf(rc->path, sizeof(rc->path), "fpga%ld_rc", id);
-    snprintf(wc->path, sizeof(wc->path), "fpga%ld_wc", id);
-
-    if(pthread_create(&tid, NULL,  init_socket, (void*)rc)){
-      fprintf(stderr, "error creating init thread\n");
-      exit(1);
-    }
-
-    if(pthread_create(&tid, NULL,  init_socket, (void*)wc)){
-      fprintf(stderr, "error creating init thread\n");
-      exit(1);
-    }
+    return head->valid && head->inflight == rr && head->req.write_flag == rr;
   }
 
-  bool writeReq32(){
-    recv_request(false);
-    return (write_head.req.write && write_head.valid && write_head.inflight);
-  }
-  
-  long writeAddr32(){
-    //fprintf(stderr, "writeAddr32()\n");
-    write_head.inflight = false;
-    return (long)write_head.req.addr;
+  long processAddr32(int v){
+    //fprintf(stderr, "processAddr32()\n");
+    headarr[v].inflight = 1 - v;
+    return (long)headarr[v].req.addr;
   }
   
   unsigned int writeData32(){
     //fprintf(stderr, "writeData32()\n");
-    write_head.valid = false;
-    return write_head.req.data;
-  }
-  
-  bool readReq32(){
-    recv_request(true);
-    return (!read_head.req.write && read_head.valid && !read_head.inflight);
-  }
-  
-  long readAddr32(){
-    //fprintf(stderr, "readAddr32()\n");
-    read_head.inflight = true;
-    return (long)read_head.req.addr;
+    headarr[1].valid = 0;
+    return headarr[1].req.data;
   }
   
   void readData32(unsigned int x){
     //fprintf(stderr, "readData()\n");
-    read_head.valid = false;
-    read_head.inflight = false;
+    headarr[0].valid = 0;
+    headarr[0].inflight = 0;
     int send_attempts = 0;
-    while(send(portals[read_head.pnum].read.s2, &x, sizeof(x), 0) == -1){
+    while(send(portals[headarr[0].pnum].p_read.sockfd, &x, sizeof(x), 0) == -1){
       if(send_attempts++ > 16){
-	fprintf(stderr, "(%d) send failure\n", read_head.pnum);
+	fprintf(stderr, "(%d) send failure\n", headarr[0].pnum);
 	exit(1);
       }
       sleep(1);
     }
   }
-
 }

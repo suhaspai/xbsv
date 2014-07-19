@@ -24,81 +24,319 @@ import Vector::*;
 import FIFOF::*;
 import FIFO::*;
 import GetPut::*;
-import Assert::*;
+import GetPut::*;
+import ClientServer::*;
+import BRAM::*;
+import BRAMFIFO::*;
+import Connectable::*;
 
+import Ratchet::*;
 import PortalMemory::*;
-import Dma::*;
+import MemTypes::*;
+import Pipe::*;
+import MemUtils::*;
 
-interface MemwriteEngine#(numeric type dataWidth);
-   method Action start(ObjectPointer pointer, Bit#(ObjectOffsetSize) base, Bit#(32) writeLen, Bit#(32) burstLen);
-   method ActionValue#(Bool) finish();
-   interface ObjectWriteClient#(dataWidth) dmaClient;
+
+module mkMemwriteEngine(MemwriteEngineV#(dataWidth, cmdQDepth, numServers))
+   provisos( Mul#(TDiv#(dataWidth, 8), 8, dataWidth)
+	    ,Add#(1, a__, numServers)
+	    ,Add#(b__, TLog#(numServers), TAdd#(1, TLog#(TMul#(cmdQDepth,numServers))))
+	    ,Pipe::FunnelPipesPipelined#(1, numServers,Tuple2#(Bit#(TLog#(numServers)), MemTypes::MemengineCmd), TMin#(2,TLog#(numServers)))
+	    ,Pipe::FunnelPipesPipelined#(1, numServers,Tuple2#(Bit#(dataWidth),Bool),TMin#(2, TLog#(numServers)))
+	    ,Add#(c__, TLog#(numServers), TLog#(TMul#(cmdQDepth, numServers)))
+	    ,Add#(1, d__, dataWidth)
+	    ,FunnelPipesPipelined#(1, numServers, Tuple3#(Bit#(2),Bit#(dataWidth),Bool), TMin#(2, TLog#(numServers)))
+	    ,FunnelPipesPipelined#(1, numServers,Tuple3#(Bit#(TLog#(numServers)), Bit#(dataWidth), Bool), TMin#(2,TLog#(numServers)))
+	    );
+   let rv <- mkMemwriteEngineBuff(256);
+   return rv;
+endmodule
+
+interface BurstFunnel#(numeric type k, numeric type w);
+   method Action loadIdx(Bit#(TLog#(k)) i);
+   interface Vector#(k, PipeIn#(Bit#(w))) dataIn;
+   interface Vector#(k, Reg#(Bit#(8))) burstLen;
+   interface PipeOut#(Tuple2#(Bit#(TLog#(k)),Bit#(w))) dataOut;
 endinterface
 
-module mkMemwriteEngine#(Integer cmdQDepth, FIFOF#(Bit#(dataWidth)) f) (MemwriteEngine#(dataWidth))
-   provisos (Div#(dataWidth,8,dataWidthBytes),
-	     Mul#(dataWidthBytes,8,dataWidth),
-	     Log#(dataWidthBytes,beatShift));
+module mkBurstFunnel#(Integer maxBurstLen)(BurstFunnel#(k,w))
+   provisos( Log#(k,logk)
+	    ,Min#(2,logk,bpc)
+	    ,FunnelPipesPipelined#(1, k, Tuple3#(Bit#(2),Bit#(w),Bool), bpc)
+	    );
 
-   Reg#(Bit#(32))             reqLen <- mkReg(0);
-   Reg#(Bit#(32))            respCnt <- mkReg(0);
+   Reg#(Bit#(2)) nameGen <- mkReg(0);
+   UGBramFifos#(4,16,Tuple2#(Bit#(w),Bool)) complBuff <- mkUGBramFifos;
+   Vector#(4, Ratchet#(16)) compCnts <- replicateM(mkRatchet(0));
+   Vector#(k,FIFOF#(Tuple3#(Bit#(2), Bit#(w), Bool))) data_in <- replicateM(mkFIFOF);
+   Vector#(k,Reg#(Bit#(8))) burst_len <- replicateM(mkReg(0));
+   Vector#(k,Reg#(Bit#(8))) drain_cnt <- replicateM(mkReg(0));
+   Reg#(Bit#(8)) inj_ctrl <- mkReg(0);
+   FIFO#(Tuple2#(Bit#(TAdd#(1,logk)),Bit#(2))) loadIdxs <- mkSizedFIFO(32);
+   FIFO#(Tuple2#(Bit#(TAdd#(1,logk)),Bit#(2))) inFlight <- mkSizedFIFO(4);
+   FunnelPipe#(1, k, Tuple3#(Bit#(2),Bit#(w),Bool),bpc) data_in_funnel <- mkFunnelPipesPipelined(map(toPipeOut,data_in));
+   Reg#(Bit#(8)) drainCnt <- mkReg(0);
+   FIFOF#(Tuple2#(Bit#(TLog#(k)),Bit#(w))) exit_data <- mkFIFOF;
+   Reg#(Bit#(2)) newName <- mkReg(0);
+   FIFO#(Bit#(logk)) drainRename <- mkFIFO;
    
-   Reg#(Bit#(32))                off <- mkReg(0);
-   Reg#(Bit#(ObjectOffsetSize)) base <- mkReg(0);
+   Reg#(Bit#(32)) cycle <- mkReg(0);
+   Reg#(Bit#(32)) last_entry <- mkReg(0);
+   
+   rule cyc;
+      cycle <= cycle+1;
+   endrule
+   
+   function PipeIn#(Bit#(w)) enter_data(FIFOF#(Tuple3#(Bit#(2), Bit#(w), Bool)) f, Integer i) = 
+      (interface PipeIn;
+   	  method Bool notFull = f.notFull;
+   	  method Action enq(Bit#(w) v) if (tpl_1(loadIdxs.first) == fromInteger(i));
+	     last_entry <= cycle;
+	     match {.old_name, .new_name} = loadIdxs.first;
+	     let first = inj_ctrl == 0;
+	     let cnt = first ? burst_len[i] : inj_ctrl;
+	     let new_cnt = cnt-1;
+	     let last = new_cnt == 0;
+	     inj_ctrl <= new_cnt;
+	     if (first)
+		inFlight.enq(loadIdxs.first);
+	     if (last) 
+		loadIdxs.deq;
+	     f.enq(tuple3(new_name, v, last));
+	     //$display("%d enq %d", cycle-last_entry, i);
+	  endmethod
+       endinterface);
+   Vector#(k, PipeIn#(Bit#(w))) data_in_pipes = zipWith(enter_data, data_in, genVector);
 
-   Reg#(ObjectPointer)       pointer <- mkReg(0);
-   Reg#(Bit#(8))            burstLen <- mkReg(0);
+   function Reg#(Bit#(8)) check(Reg#(Bit#(8)) r) =
+      (interface Reg;
+	  method Action _write(Bit#(8) v);
+	     if(v > 16) begin
+		$display("ERROR mkBurstFunnel: burstLen too large");
+		$finish;
+	     end
+	     r <= v;
+	  endmethod
+	  method Bit#(8) _read = r._read;
+       endinterface);
 
-   FIFOF#(Bool)                   ff <- mkSizedFIFOF(1);
-   FIFOF#(Tuple2#(Bit#(32),Bit#(8))) wf <- mkSizedFIFOF(cmdQDepth);
+   rule drain_funnel;
+      match{.new_name,.data,.last} = data_in_funnel[0].first;
+      data_in_funnel[0].deq;
+      complBuff.enq(new_name,tuple2(data,last));
+      compCnts[new_name].increment(1);
+   endrule
+      
+   
+   rule drain_req (compCnts[tpl_2(inFlight.first)].read > 0);
+      let nn = newName;
+      let new_drainCnt = drainCnt-1;
+      if (drainCnt == 0) begin
+	 match {.old_name, .new_name} = inFlight.first;
+	 newName <= new_name;
+	 nn = new_name;
+	 new_drainCnt = burst_len[old_name]-1;
+	 drainRename.enq(truncate(old_name));
+      end
+      if (new_drainCnt == 0) begin
+	 inFlight.deq;
+      end
+      complBuff.first_req(nn);
+      drainCnt <= new_drainCnt;
+      compCnts[newName].decrement(1);
+      complBuff.deq(nn);
+   endrule
+      
+   rule drain_resp;
+      match {.data,.last} <- complBuff.first_resp;
+      if (last)
+	 drainRename.deq;
+      exit_data.enq(tuple2(drainRename.first,data));
+   endrule
+      
+   method Action loadIdx(Bit#(logk) idx);
+      loadIdxs.enq(tuple2(extend(idx),nameGen));
+      nameGen <= nameGen+1;
+   endmethod
+   interface burstLen = map(check,burst_len);
+   interface dataIn = data_in_pipes;
+   interface PipeOut dataOut = toPipeOut(exit_data);
+endmodule
 
+module mkMemwriteEngineBuff#(Integer bufferSizeBytes)(MemwriteEngineV#(dataWidth, cmdQDepth, numServers))
+   provisos ( Div#(dataWidth,8,dataWidthBytes)
+	     ,Mul#(dataWidthBytes,8,dataWidth)
+	     ,Log#(dataWidthBytes,beatShift)
+	     ,Log#(cmdQDepth,logCmdQDepth)
+	     ,Mul#(cmdQDepth,numServers,cmdBuffSz)
+	     ,Log#(cmdBuffSz, cmdBuffAddrSz)
+	     ,Log#(numServers, serverIdxSz)
+	     ,Add#(1,logCmdQDepth, outCntSz)
+	     ,Add#(1, c__, numServers)
+	     ,Add#(b__, TLog#(numServers), cmdBuffAddrSz)
+	     ,Add#(e__, TLog#(numServers), TAdd#(1, cmdBuffAddrSz))
+	     ,Add#(a__, serverIdxSz, cmdBuffAddrSz)
+	     ,Min#(2,TLog#(numServers),bpc)
+	     ,FunnelPipesPipelined#(1,numServers,Tuple2#(Bit#(serverIdxSz),MemengineCmd),bpc)
+	     ,FunnelPipesPipelined#(1,numServers,Tuple2#(Bit#(dataWidth),Bool),bpc)
+	     ,FunnelPipesPipelined#(1, numServers, Tuple3#(Bit#(2),Bit#(dataWidth),Bool), TMin#(2, serverIdxSz))
+	     ,Add#(1, d__, dataWidth)
+	     ,FunnelPipesPipelined#(1, numServers, Tuple3#(Bit#(serverIdxSz),Bit#(dataWidth), Bool), TMin#(2, serverIdxSz))
+	     );
+   
+   
+   Integer bufferSizeBeats = bufferSizeBytes/valueOf(dataWidthBytes);
+   Vector#(numServers, Reg#(Bit#(outCntSz)))     outs1 <- replicateM(mkReg(0));
+   Vector#(numServers, Reg#(Bit#(outCntSz)))     outs0 <- replicateM(mkReg(0));
+   Vector#(numServers, Ratchet#(16))           buffCap <- replicateM(mkRatchet(0));
+   UGBramFifos#(numServers,cmdQDepth,MemengineCmd) cmdBuf <- mkUGBramFifos;
+
+   FIFO#(Bit#(serverIdxSz))                       loadf_a <- mkSizedFIFO(1);
+   FIFO#(MemengineCmd)                            loadf_b <- mkSizedFIFO(1);
+   FIFO#(Tuple2#(Bit#(serverIdxSz),MemengineCmd)) loadf_c <- mkSizedFIFO(1);
+   FIFO#(Tuple3#(Bit#(8),Bit#(serverIdxSz),Bool))   workf <- mkSizedFIFO(32); // is this the right size?
+   FIFO#(Tuple2#(Bit#(serverIdxSz),Bool))           donef <- mkSizedFIFO(32); // is this the right size?
+   
+   Vector#(numServers, FIFO#(void))              outfs <- replicateM(mkSizedFIFO(1));
+   Vector#(numServers, FIFOF#(Tuple2#(Bit#(serverIdxSz), MemengineCmd))) cmds_in <- replicateM(mkSizedFIFOF(1));
+   FunnelPipe#(1, numServers, Tuple2#(Bit#(serverIdxSz), MemengineCmd),bpc) cmds_in_funnel <- mkFunnelPipesPipelined(map(toPipeOut,cmds_in));
+   Vector#(numServers, FIFOF#(Bit#(dataWidth)))  write_data_buffs <- replicateM(mkSizedBRAMFIFOF(bufferSizeBeats));
+   Vector#(numServers, PipeOut#(Bit#(dataWidth))) foo = map(toPipeOut, write_data_buffs); 
+   BurstFunnel#(numServers,dataWidth) write_data_funnel <- mkBurstFunnel(bufferSizeBeats);
+   zipWithM(mkConnection, foo, write_data_funnel.dataIn);
+      
+   Reg#(Bit#(8))                               respCnt <- mkReg(0);
+   Reg#(Bit#(serverIdxSz))                     loadIdx <- mkReg(0);
    let beat_shift = fromInteger(valueOf(beatShift));
+   let cmd_q_depth = fromInteger(valueOf(cmdQDepth));
    
-   method Action start(ObjectPointer p, Bit#(ObjectOffsetSize) b, Bit#(32) wl, Bit#(32) bl) if (off >= reqLen);
-      dynamicAssert(bl[31:8]==0, "mkMemwriteEngine::start");
-      reqLen   <= wl;
-      off      <= 0;
-      pointer  <= p;
-      burstLen <= truncate(bl);
-      base     <= b;
-      wf.enq(tuple2(wl>>beat_shift,truncate(bl>>beat_shift))); 
-   endmethod
+   rule store_cmd;
+      match {.idx, .cmd} <- toGet(cmds_in_funnel[0]).get;
+      outs1[idx] <= outs1[idx]+1;
+      cmdBuf.enq(idx,cmd);
+      //$display("store_cmd %d", idx);
+   endrule
 
-   method ActionValue#(Bool) finish();
-      ff.deq;
-      return ff.first;
-   endmethod
+   rule load_ctxt_a;
+      loadIdx <= loadIdx+1;
+      if (outs1[loadIdx] > 0) begin
+	 cmdBuf.first_req(loadIdx);
+	 loadf_a.enq(loadIdx);
+	 //$display("load_ctxt_a %d", loadIdx);
+      end
+   endrule
 
+   rule load_ctxt_b;
+      let cmd <- cmdBuf.first_resp;
+      loadf_b.enq(cmd);
+   endrule
+
+   rule load_ctxt_c;
+      let idx <- toGet(loadf_a).get;
+      let cmd <- toGet(loadf_b).get;
+      //$display("%d %d %d", outs1[idx], buffCap[idx].read(), cmd.burstLen>>beat_shift);
+      if (outs1[idx] > 0 && buffCap[idx].read() >= unpack(extend(cmd.burstLen>>beat_shift))) begin
+	 //$display("load_ctxt_b %h %d", cmd.base, idx);
+	 buffCap[idx].decrement(unpack(extend(cmd.burstLen>>beat_shift)));
+	 loadf_c.enq(tuple2(idx,cmd));
+	 write_data_funnel.loadIdx(idx);
+	 if (cmd.len <= extend(cmd.burstLen)) begin
+	    outs1[idx] <= outs1[idx]-1;
+	    cmdBuf.deq(idx);
+	 end
+	 else begin
+	    let new_cmd = MemengineCmd{pointer:cmd.pointer, base:cmd.base+extend(cmd.burstLen), burstLen:cmd.burstLen, len:cmd.len-extend(cmd.burstLen)};
+	    cmdBuf.upd_head(idx,new_cmd);
+	 end
+      end
+   endrule
+   
+   function PipeIn#(Bit#(w)) check_in(FIFOF#(Bit#(w)) f, Integer i) = 
+      (interface PipeIn;
+   	  method Bool notFull = f.notFull;
+   	  method Action enq(Bit#(w) v);
+	     f.enq(v);
+	     buffCap[i].increment(1);
+	     //$display("check_in %d", i);
+	     // if(i==2)
+	     // 	for(Integer j = 0; j < valueOf(w); j=j+32) begin
+	     // 	   Bit#(32) xx = v[j+31:j]; 
+	     // 	   $display("%h", xx);
+	     // 	end
+	  endmethod
+       endinterface);
+
+   
+   Vector#(numServers, Server#(MemengineCmd,Bool)) rs;
+   for(Integer i = 0; i < valueOf(numServers); i=i+1)
+      rs[i] = (interface Server#(MemengineCmd,Bool);
+		  interface Put request;
+		     method Action put(MemengineCmd c) if (outs0[i] < cmd_q_depth);
+			Bit#(32) bsb = fromInteger(bufferSizeBytes);
+			if(extend(c.burstLen) > bsb)
+			   $display("mkMemwriteEngineV::unsupportedBurstLen");
+			outs0[i] <= outs0[i]+1;
+			cmds_in[i].enq(tuple2(fromInteger(i),c));
+			write_data_funnel.burstLen[i] <= c.burstLen >> beat_shift;
+			//$display("(%d) %h %h %h", i, c.base, c.len, c.burstLen);
+ 		     endmethod
+		  endinterface
+		  interface Get response;
+		     method ActionValue#(Bool) get;
+			outfs[i].deq;
+	 		outs0[i] <= outs0[i]-1;
+			return True;
+		     endmethod
+		  endinterface
+	       endinterface);
+   interface writeServers = rs;
    interface ObjectWriteClient dmaClient;
       interface Get writeReq;
-	 method ActionValue#(ObjectRequest) get() if (off < reqLen);
-	    off <= off + extend(burstLen);
-	    let bl = burstLen;
-	    if (off + extend(burstLen) > reqLen)
-	       bl = truncate(reqLen - off);
-	    return ObjectRequest {pointer: pointer, offset: extend(off)+base, burstLen: bl, tag: 0};
+	 method ActionValue#(ObjectRequest) get();
+	    match {.idx, .cmd} <- toGet(loadf_c).get;
+	    Bit#(8) bl = cmd.burstLen;
+	    Bool last = False;
+	    if (cmd.len <= extend(bl)) begin
+	       last = True;
+	       bl = truncate(cmd.len);
+	    end
+	    workf.enq(tuple3(truncate(bl>>beat_shift), idx, last));
+	    //$display("writeReq %d, %h %h %h", idx, cmd.base, bl, last);
+	    return ObjectRequest { pointer: cmd.pointer, offset: cmd.base, burstLen:bl, tag: 0 };
 	 endmethod
       endinterface
       interface Get writeData;
-	 method ActionValue#(ObjectData#(dataWidth)) get();
-	    f.deq;
-	    return ObjectData{data:f.first, tag: 0};
+	 method ActionValue#(ObjectData#(dataWidth)) get;
+	    match {.rc, .idx, .last} = workf.first;
+	    let new_respCnt = respCnt+1;
+	    if (new_respCnt == rc) begin
+	       respCnt <= 0;
+	       workf.deq;
+	       donef.enq(tuple2(idx,last));
+	    end
+	    else begin
+	       respCnt <= new_respCnt;
+	    end
+	    match {._idx, .wd} <- toGet(write_data_funnel.dataOut).get;
+	    if(_idx != idx) begin
+	       $display("ERROR mkMemwriteEngineBuf: bursts oo %d %d", idx, _idx);
+	       $finish;
+	    end
+	    return ObjectData{data:wd, tag:0, last: False};
 	 endmethod
       endinterface
       interface Put writeDone;
 	 method Action put(Bit#(6) tag);
-	    let wl = tpl_1(wf.first);
-	    let bl = tpl_2(wf.first);
-	    if (respCnt+extend(bl) >= wl) begin
-	       ff.enq(True);
-	       respCnt <= 0;
-	       wf.deq;
-	    end
-	    else begin
-	       respCnt <= respCnt+extend(bl);
-	    end
+	    match {.idx, .last} <- toGet(donef).get;
+	    if (last)
+	       outfs[idx].enq(?);
+	    //$display("writeDone %d %d", idx, last);
 	 endmethod
       endinterface
-   endinterface
-
+   endinterface 
+   interface dataPipes = zipWith(check_in, write_data_buffs, genVector);
 endmodule
+
+
+
+	       

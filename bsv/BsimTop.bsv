@@ -20,6 +20,7 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+import Clocks            :: *;
 import Vector            :: *;
 import FIFOF             :: *;
 import FIFO              :: *;
@@ -32,15 +33,26 @@ import AxiMasterSlave    :: *;
 import Leds              :: *;
 import Top               :: *;
 import AxiMasterSlave    :: *;
+import MemTypes          :: *;
 import AxiDma            :: *;
+import HostInterface    :: *;
+
+`ifndef DataBusWidth
+`define DataBusWidth 64
+`endif
+`ifndef PinType
+`define PinType Empty
+`endif
+
+typedef `PinType PinType;
+typedef `NumberOfMasters NumberOfMasters;
+typedef `DataBusWidth DataBusWidth;
 
 // implemented in BsimCtrl.cxx
 import "BDPI" function Action      initPortal(Bit#(32) d);
-import "BDPI" function Bool                    writeReq32();
-import "BDPI" function ActionValue#(Bit#(32)) writeAddr32();
+import "BDPI" function Bool                    processReq32(Bit#(32) v);
+import "BDPI" function ActionValue#(Bit#(32)) processAddr32(Bit#(32) v);
 import "BDPI" function ActionValue#(Bit#(32)) writeData32();
-import "BDPI" function Bool                     readReq32();
-import "BDPI" function ActionValue#(Bit#(32))  readAddr32();
 import "BDPI" function Action        readData32(Bit#(32) d);
 		 
 // implemented in BsimDma.cxx		 
@@ -50,7 +62,6 @@ import "BDPI" function Action write_pareff32(Bit#(32) handle, Bit#(32) addr, Bit
 import "BDPI" function Action write_pareff64(Bit#(32) handle, Bit#(32) addr, Bit#(64) v);
 import "BDPI" function ActionValue#(Bit#(32)) read_pareff32(Bit#(32) handle, Bit#(32) addr);
 import "BDPI" function ActionValue#(Bit#(64)) read_pareff64(Bit#(32) handle, Bit#(32) addr);
-		 
 		 
 interface BsimCtrlReadWrite#(numeric type asz, numeric type dsz);
    method ActionValue#(Bit#(asz)) readAddr();
@@ -68,17 +79,17 @@ endtypeclass
 instance SelectBsimCtrlReadWrite#(32,32);
    module selectBsimCtrlReadWrite(BsimCtrlReadWrite#(32,32) ifc);
       method ActionValue#(Bit#(32)) readAddr();
-	 let rv <- readAddr32();
+	 let rv <- processAddr32(0);
 	 return extend(rv);
       endmethod
       method Action readData(Bit#(32) d);		    
 	 readData32(d);
       endmethod
       method Bool readReq();
-	 return readReq32();
+	 return processReq32(0);
       endmethod
       method ActionValue#(Bit#(32)) writeAddr();
-	 let rv <- writeAddr32();
+	 let rv <- processAddr32(1);
 	 return extend(rv);
       endmethod
       method ActionValue#(Bit#(32)) writeData();
@@ -86,7 +97,7 @@ instance SelectBsimCtrlReadWrite#(32,32);
 	 return rv;
       endmethod
       method Bool writeReq();
-	 return writeReq32();
+	 return processReq32(1);
       endmethod
    endmodule
 endinstance
@@ -135,18 +146,7 @@ instance SelectBsimRdmaReadWrite#(128);
        endmethod
    endmodule
 endinstance
-
-// this interface should allow for different master and slave bus paraters;		 
-interface BsimHost#(numeric type clientAddrWidth, numeric type clientBusWidth, numeric type clientIdWidth,  
-		    numeric type serverAddrWidth, numeric type serverBusWidth, numeric type serverIdWidth,
-		    numeric type nSlaves);
-   interface Axi3Master#(clientAddrWidth, clientBusWidth, clientIdWidth)  axi_client;
-   interface Vector#(nSlaves,Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))  axi_servers;
-endinterface
 		 
-`define OO_MEM_COMPLETION		 
-		 
-
 module mkAxi3Slave(Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))
    provisos (SelectBsimRdmaReadWrite#(serverBusWidth));
 		    
@@ -159,45 +159,40 @@ module mkAxi3Slave(Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))
    Reg#(Bit#(5))  writeLen <- mkReg(0);
    Reg#(Bit#(serverIdWidth)) writeId <- mkReg(0);
    
-   Bit#(64) readLatency = 128;
-   Bit#(64) writeLatency = 128;
+   let readLatency_I = 150;
+   let writeLatency_I = 150;
+
+   Bit#(64) readLatency = fromInteger(readLatency_I);
+   Bit#(64) writeLatency = fromInteger(writeLatency_I);
    
    Reg#(Bit#(64)) req_ar_b_ts <- mkReg(0);
    Reg#(Bit#(64)) req_aw_b_ts <- mkReg(0);
    Reg#(Bit#(64)) cycle <- mkReg(0);
+   Reg#(Bit#(64)) last_reqAr <- mkReg(0);
+   Reg#(Bit#(64)) last_read_eob <- mkReg(0);
+   Reg#(Bit#(64)) last_write_eob <- mkReg(0);
 
-`ifdef OO_MEM_COMPLETION
-   Vector#(4,FIFOF#(Tuple2#(Bit#(64), Axi3ReadRequest#(serverAddrWidth,serverIdWidth)))) readDelayFifos <- replicateM(mkSizedFIFOF(8));
-   let readDelayFifo = (readDelayFifos[3].notEmpty ? readDelayFifos[3] : (readDelayFifos[2].notEmpty ? readDelayFifos[2] : (readDelayFifos[1].notEmpty ? readDelayFifos[1] : readDelayFifos[0])));
-`else
-   FIFOF#(Tuple2#(Bit#(64), Axi3ReadRequest#(serverAddrWidth,serverIdWidth))) readDelayFifo <- mkSizedFIFOF(8);
-`endif
-   
-   FIFOF#(Tuple2#(Bit#(64),Axi3WriteRequest#(serverAddrWidth,serverIdWidth))) writeDelayFifo <- mkSizedFIFOF(32);
+   FIFOF#(Tuple2#(Bit#(64), Axi3ReadRequest#(serverAddrWidth,serverIdWidth)))  readDelayFifo <- mkSizedFIFOF(readLatency_I/4);
+   FIFOF#(Tuple2#(Bit#(64),Axi3WriteRequest#(serverAddrWidth,serverIdWidth))) writeDelayFifo <- mkSizedFIFOF(writeLatency_I/4);
 
-`ifdef OO_MEM_COMPLETION
-   Vector#(4,FIFOF#(Tuple2#(Bit#(64), Axi3WriteResponse#(serverIdWidth)))) bFifos <- replicateM(mkFIFOF());
-   let bFifo = (bFifos[3].notEmpty ? bFifos[3] : (bFifos[2].notEmpty ? bFifos[2] : (bFifos[1].notEmpty ? bFifos[1] : bFifos[0])));
-`else
-   FIFOF#(Tuple2#(Bit#(64), Axi3WriteResponse#(serverIdWidth))) bFifo <- mkFIFOF();		 
-`endif 
+   FIFOF#(Tuple2#(Bit#(64), Axi3WriteResponse#(serverIdWidth))) bFifo <- mkSizedFIFOF(16);
   
    rule increment_cycle;
       cycle <= cycle+1;
    endrule
    
+   let read_jitter = True; //cycle[4:0] == 0; 
+   let write_jitter = True; //cycle[4:0] == 5; 
+   
    interface Put req_ar;
       method Action put(Axi3ReadRequest#(serverAddrWidth,serverIdWidth) req);
-	 //$display("mkBsimHost::req_ar id=%d", req.id);
-`ifdef OO_MEM_COMPLETION
-	 readDelayFifos[req.id[1:0]].enq(tuple2(cycle,req));
-`else
+	 //$display("mkBsimHost::req_ar_a: %d %d", req.id, cycle-last_reqAr);
+	 //last_reqAr <= cycle;
 	 readDelayFifo.enq(tuple2(cycle,req));
-`endif	    
       endmethod
    endinterface
    interface Get resp_read;
-      method ActionValue#(Axi3ReadResponse#(serverBusWidth,serverIdWidth)) get if ((readLen > 0) || (readLen == 0 && (cycle-tpl_1(readDelayFifo.first)) > readLatency));
+      method ActionValue#(Axi3ReadResponse#(serverBusWidth,serverIdWidth)) get if (((readLen > 0) || (readLen == 0 && (cycle-tpl_1(readDelayFifo.first)) > readLatency)) && read_jitter);
 	 Bit#(5) read_len = ?;
 	 Bit#(serverAddrWidth) read_addr = ?;
 	 Bit#(serverIdWidth) read_id = ?;
@@ -210,9 +205,12 @@ module mkAxi3Slave(Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))
 	    read_addr = req.address;
 	    read_id = req.id;
 	    handle = req.address[39:32];
-	    //$display("mkBsimHost::req_ar_b: id=%d len=%d", req.id, read_len);
+	    //$display("mkBsimHost::resp_read_a: %d %d", req.id,  cycle-last_read_eob);
+	    //last_read_eob <= cycle;
 	 end 
 	 else begin
+	    //$display("mkBsimHost::resp_read_b: %d %d", readId,  cycle-last_read_eob);
+	    //last_read_eob <= cycle;
 	    handle = readAddrr[39:32];
 	    read_addr = readAddrr;
 	    read_id = readId;
@@ -233,7 +231,7 @@ module mkAxi3Slave(Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))
       endmethod
    endinterface
    interface Put resp_write;
-      method Action put(Axi3WriteData#(serverBusWidth,serverIdWidth) resp) if ((writeLen > 0) || (writeLen == 0 && (cycle-tpl_1(writeDelayFifo.first)) > writeLatency));
+      method Action put(Axi3WriteData#(serverBusWidth,serverIdWidth) resp) if (((writeLen > 0) || (writeLen == 0 && (cycle-tpl_1(writeDelayFifo.first)) > writeLatency)) && write_jitter); 
 	 Bit#(5) write_len = ?;
 	 Bit#(serverAddrWidth) write_addr = ?;
 	 Bit#(serverIdWidth) write_id = ?;
@@ -246,9 +244,12 @@ module mkAxi3Slave(Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))
 	    write_len = extend(req.len)+1;
 	    write_id = req.id;
 	    handle = req.address[39:32];
-	    //$display("mkBsimHost::req_aw_b(%h): id=%d len=%d", cycle-req_aw_b_ts, req.id, write_len);
+	    //$display("mkBsimHost::resp_write_a: %d %d", req.id,  cycle-last_write_eob);
+	    //last_write_eob <= cycle;
 	 end
 	 else begin
+	    //$display("mkBsimHost::resp_write_b: %d %d", writeId,  cycle-last_write_eob);
+	    //last_write_eob <= cycle;
 	    handle = writeAddrr[39:32];
 	    write_len = writeLen;
 	    write_addr = writeAddrr;
@@ -260,11 +261,7 @@ module mkAxi3Slave(Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))
 	 writeLen <= write_len - 1;
 	 writeAddrr <= write_addr + fromInteger(valueOf(serverBusWidth)/8);
 	 if (write_len == 1) begin
-`ifdef OO_MEM_COMPLETION	       
-	    bFifos[write_id[1:0]].enq(tuple2(cycle,Axi3WriteResponse { id: write_id, resp: 0 }));
-`else
 	    bFifo.enq(tuple2(cycle,Axi3WriteResponse { id: write_id, resp: 0 }));
-`endif	       
 	 end
       endmethod
    endinterface
@@ -278,9 +275,9 @@ module mkAxi3Slave(Axi3Slave#(serverAddrWidth,  serverBusWidth, serverIdWidth))
 endmodule
    
 		 
-module [Module] mkBsimHost (BsimHost#(clientAddrWidth, clientBusWidth, clientIdWidth,
-				      serverAddrWidth, serverBusWidth, serverIdWidth,
-				      nSlaves))
+module  mkBsimHost#(Clock double_clock, Reset double_reset)(BsimHost#(clientAddrWidth, clientBusWidth, clientIdWidth,
+			      serverAddrWidth, serverBusWidth, serverIdWidth,
+			      nSlaves))
    provisos (SelectBsimRdmaReadWrite#(serverBusWidth),
 	     SelectBsimCtrlReadWrite#(clientAddrWidth, clientBusWidth));
    
@@ -296,6 +293,14 @@ module [Module] mkBsimHost (BsimHost#(clientAddrWidth, clientBusWidth, clientIdW
 		      initPortal(5);
 		      initPortal(6);
 		      initPortal(7);
+		      initPortal(8);
+		      initPortal(9);
+		      initPortal(10);
+		      initPortal(11);
+		      initPortal(12);
+		      initPortal(13);
+		      initPortal(14);
+		      initPortal(15);
                    endaction);
    let init_fsm <- mkOnce(init_seq);
    
@@ -305,60 +310,71 @@ module [Module] mkBsimHost (BsimHost#(clientAddrWidth, clientBusWidth, clientIdW
    endrule
 
    interface axi_servers = servers;
-   interface Axi3Master axi_client;
-      interface Get req_ar;
-	 method ActionValue#(Axi3ReadRequest#(clientAddrWidth,clientIdWidth)) get() if (crw.readReq);
+   interface MemMaster mem_client;
+      interface MemReadClient read_client;
+        interface Get readReq;
+	 method ActionValue#(MemRequest#(clientAddrWidth)) get() if (crw.readReq);
 	    //$write("req_ar: ");
 	    let ra <- crw.readAddr;
 	    //$display("ra=%h", ra);
-	    return Axi3ReadRequest { address: ra, len: 0, size: axiBusSize(32), id: 0, prot: 0, burst: 1, cache: 'b11, qos: 0, lock: 0 };
+	    return MemRequest { addr: ra, burstLen: 1, tag: 0};
 	 endmethod
-      endinterface
-      interface Put resp_read;
-	 method Action put(Axi3ReadResponse#(clientBusWidth,clientIdWidth) rd);
+        endinterface
+        interface Put readData;
+	 method Action put(MemData#(clientBusWidth) rd);
 	    //$display("resp_read: rd=%h", rd);
 	    crw.readData(rd.data);
 	 endmethod
+        endinterface
       endinterface
-      interface Get req_aw;
-	 method ActionValue#(Axi3WriteRequest#(clientAddrWidth,clientIdWidth)) get() if (crw.writeReq());
+      interface MemWriteClient write_client;
+        interface Get writeReq;
+	 method ActionValue#(MemRequest#(clientAddrWidth)) get() if (crw.writeReq());
 	    //$write("req_aw: ");
 	    let wa <- crw.writeAddr;
 	    let wd <- crw.writeData;
 	    //$display("wa=%h, wd=%h", wa,wd);
 	    wf.enq(wd);
-	    return Axi3WriteRequest { address: wa, len: 0, size: axiBusSize(32), id: 0, prot: 0, burst: 1, cache: 'b11, qos: 0, lock: 0 };
+	    return MemRequest { addr: wa, burstLen: 1, tag: 0 };
 	 endmethod
-      endinterface
-      interface Get resp_write;
-	 method ActionValue#(Axi3WriteData#(clientBusWidth,clientIdWidth)) get;
+        endinterface
+        interface Get writeData;
+	 method ActionValue#(MemData#(clientBusWidth)) get;
 	    wf.deq;
 	    //$display("resp_write %h", wf.first);
-	    return Axi3WriteData { data: wf.first, id: 0, last: 1 };
+	    return MemData { data: wf.first, tag: 0, last: True };
 	 endmethod
-      endinterface
-      interface Put resp_b;
-	 method Action put(Axi3WriteResponse#(clientIdWidth) resp);
+        endinterface
+        interface Put writeDone;
+	 method Action put(Bit#(ObjectTagSize) resp);
 	    noAction;
 	 endmethod
+        endinterface
       endinterface
    endinterface
+   interface doubleClock = double_clock;
+   interface doubleReset = double_reset;
 endmodule
-   
-typedef (function Module#(PortalTop#(40, dsz, ipins, nMasters)) mkPortalTop()) MkPortalTop#(numeric type dsz, type ipins, numeric type nMasters);
+		 
+module  mkBsimTop(Empty)
+   provisos (SelectBsimRdmaReadWrite#(DataBusWidth));
+   let divider <- mkClockDivider(2);
+   Clock doubleClock = divider.fastClock;
+   Clock singleClock = divider.slowClock;
+   Reset doubleReset <- exposeCurrentReset;
+   let single_reset <- mkReset(2, True, singleClock); 
+   Reset singleReset = single_reset.new_rst;
+   BsimHost#(32,32,12,40,DataBusWidth,6,NumberOfMasters) host <- mkBsimHost(clocked_by singleClock, reset_by singleReset, doubleClock, doubleReset);
+`ifdef IMPORT_HOSTIF
+   PortalTop#(40,DataBusWidth,PinType,NumberOfMasters) top <- mkPortalTop(clocked_by singleClock, reset_by singleReset, host);
+`else
+   PortalTop#(40,DataBusWidth,PinType,NumberOfMasters) top <- mkPortalTop(clocked_by singleClock, reset_by singleReset);
+`endif
+   Vector#(NumberOfMasters,Axi3Master#(40,DataBusWidth,6)) m_axis <- mapM(mkAxiDmaMaster,top.masters, clocked_by singleClock, reset_by singleReset);
+   mkConnection(host.mem_client, top.slave, clocked_by singleClock, reset_by singleReset);
+   mapM(uncurry(mkConnection),zip(m_axis, host.axi_servers), clocked_by singleClock, reset_by singleReset);
 
-module [Module] mkBsimTopFromPortal#(MkPortalTop#(dsz,Empty,nMasters) mkPortalTop)(Empty)
-   provisos (SelectBsimRdmaReadWrite#(dsz),
-	     Mul#(TDiv#(dsz, 8), 8, dsz));
-   BsimHost#(32,32,12,40,dsz,6,nMasters) host <- mkBsimHost;
-   PortalTop#(40,dsz,Empty,nMasters) top <- mkPortalTop;
-   Vector#(nMasters,Axi3Master#(40,dsz,6)) m_axis <- mapM(mkAxiDmaMaster,top.masters);
-   Axi3Slave#(32,32,12) ctrl <- mkAxiDmaSlave(top.slave);
-   mkConnection(host.axi_client, ctrl);
-   mapM(uncurry(mkConnection),zip(m_axis, host.axi_servers));
-endmodule
-
-module mkBsimTop(Empty);
-   let top <- mkBsimTopFromPortal(mkPortalTop);
-   return top;
+`ifdef BSIMRESPONDER
+   `BSIMRESPONDER (top.pins);
+`endif
 endmodule

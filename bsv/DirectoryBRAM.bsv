@@ -33,13 +33,13 @@ import Assert::*;
 
 //portz libraries
 import Portal::*;
-import Dma::*;
+import MemTypes::*;
 import Ctrl2BRAM::*;
 
 interface Directory#(numeric type _n,
 		     numeric type _a, 
 		     numeric type _d);
-   interface Portal#(_a,_d) portalIfc;
+   interface MemPortal#(_a,_d) portalIfc;
 endinterface
 
 typedef Directory#(16,16,32) StdDirectory;

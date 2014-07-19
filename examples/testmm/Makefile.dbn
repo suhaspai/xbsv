@@ -1,0 +1,42 @@
+BSVDIR=$(XBSVDIR)/bsv
+S2H = RbmRequest MmRequest SigmoidRequest TimerRequest DmaConfig FpMacRequest FpMulRequest MmDebugRequest 
+H2S = RbmIndication MmIndication SigmoidIndication TimerIndication DmaIndication FpMacIndication FpMulIndication MmDebugIndication
+BSVFILES = $(DBNDIR)/bsv/RbmTypes.bsv $(DBNDIR)/bsv/Timer.bsv $(DBNDIR)/bsv/FpMacTb.bsv $(DBNTOPBSV)
+CPPFILES= $(DBNDIR)/cpp/portalmat.cpp $(DBNDIR)/cpp/rbm.cpp $(TESTCPPFILES)
+XBSVFLAGS += --clib opencv_core --stl=stlport_static
+XBSVFLAGS += -D IMPORT_HOSTIF
+XBSVFLAGS += --bscflags="+RTS -K16777216 -RTS"
+Dma = Dma
+PINS = Std
+
+FAMILY=$(shell echo $(BOARD) | sed 's/z.*/zynq/' | sed 's/k.*/kintex/' | sed 's/v.*/virtex/')
+
+##
+## To build testmm for Android on Zynq
+## cd $(XBSVDIR); cd ..; git clone git://github.com:cambridgehackers/opencv-android-sdk.git
+##
+
+ifeq (zynq,$(FAMILY))
+NDK_DIR=$(shell ndk-which gcc | sed 's:toolchains.*::')
+OPENCVDIR=$(XBSVDIR)/../opencv-android-sdk/sdk/native/
+XBSVFLAGS += -I$(DBNDIR)/cpp -I$(OPENCVDIR)/jni/include -L$(OPENCVDIR)/libs/armeabi-v7a -lz -L$(NDK_DIR)/sources/cxx-stl/stlport/libs/armeabi-v7a/ -lstlport_static
+NUMBER_OF_MASTERS=2
+endif
+
+gen:: $(DBNDIR)/datasets
+
+synth-ip.tcl:
+	ln -svf $(XBSVDIR)/examples/testmm/synth-ip.tcl .
+
+prebuild:: synth-ip.tcl
+
+
+include $(XBSVDIR)/Makefile.common
+
+$(DBNDIR)/datasets:
+	mkdir -p $(DBNDIR)/datasets
+	wget -P $(DBNDIR)/datasets http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz
+	wget -P $(DBNDIR)/datasets http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz
+	wget -P $(DBNDIR)/datasets http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz
+	wget -P $(DBNDIR)/datasets http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz
+	cd $(DBNDIR)/datasets; gunzip *.gz

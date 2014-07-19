@@ -29,8 +29,10 @@
 //#include <fcntl.h>
 //#include <pthread.h>
 //#include <semaphore.h>
+#include <ctype.h> // isprint, isascii
 #include "i2chdmi.h"
 #include "i2ccamera.h"
+#include "edid.h"
 
 #include "ImageonSensorRequestProxy.h"
 #include "ImageonSensorIndicationWrapper.h"
@@ -44,6 +46,9 @@ static ImageonSensorRequestProxy *sensordevice;
 static ImageonSerdesRequestProxy *serdesdevice;
 static HdmiInternalRequestProxy *hdmidevice;
 static int trace_spi = 0;
+static int nlines = 1080;
+static int npixels = 1920;
+static int fbsize = nlines*npixels*4;
 
 #define DECL(A) \
     static sem_t sem_ ## A; \
@@ -83,10 +88,11 @@ class HdmiInternalIndication: public HdmiInternalIndicationWrapper {
     HdmiInternalRequestProxy *hdmiRequest;
 public:
     HdmiInternalIndication(int id, HdmiInternalRequestProxy *proxy, PortalPoller *poller = 0) : HdmiInternalIndicationWrapper(id, poller), hdmiRequest(proxy) {}
-    virtual void vsync ( const uint64_t v ) {
-        printf("vsync v=%llx\n", v);
+    virtual void vsync ( uint64_t v, uint32_t w ) {
+        fprintf(stderr, "[%s:%d] v=%d w=%d\n", __FUNCTION__, __LINE__, (uint32_t) v, w);
         hdmiRequest->waitForVsync(v+1);
     }
+
 };
 
 static void init_local_semaphores(void)
@@ -406,11 +412,16 @@ static void fmc_imageon_demo_init(int argc, const char **argv)
     //ret = fmc_iic_axi_init(uBaseAddr_IIC_FmcImageon);
     //fmc_iic_axi_GpoWrite(uBaseAddr_IIC_FmcImageon, fmc_iic_axi_GpoRead(uBaseAddr_IIC_FmcImageon) | 2);
     sensordevice->set_host_oe(1);
-    hdmidevice->setTestPattern(0);
 
+printf("[%s:%d] before i2c_camera\n", __FUNCTION__, __LINE__);
     init_i2c_camera();
+printf("[%s:%d] before i2c_hdmi\n", __FUNCTION__, __LINE__);
     init_i2c_hdmi();
+printf("[%s:%d] after i2c_hdmi\n", __FUNCTION__, __LINE__);
     //init_vclk();
+sleep(5);
+//sleep(10000);
+    hdmidevice->setTestPattern(0);
 
     // Reset DCMs
     /* puts the DCM_0 PCORE into reset */
@@ -445,6 +456,25 @@ int main(int argc, const char **argv)
     ImageonSerdesIndicationWrapper *imageonSerdesIndication = new ImageonSerdesIndication(IfcNames_ImageonSerdesIndication);
     ImageonSensorIndicationWrapper *imageonSensorIndication = new ImageonSensorIndication(IfcNames_ImageonSensorIndication);
     HdmiInternalIndicationWrapper *hdmiIndication = new HdmiInternalIndication(IfcNames_HdmiInternalIndication, hdmidevice);
+    // read out monitor EDID from ADV7511
+    struct edid edid;
+    init_i2c_hdmi();
+    int i2cfd = open("/dev/i2c-0", O_RDWR);
+    fprintf(stderr, "Monitor EDID:\n");
+    for (int i = 0; i < 256; i++) {
+      edid.raw[i] = i2c_read_reg(i2cfd, 0x3f, i);
+      fprintf(stderr, " %02x", edid.raw[i]);
+      if ((i % 16) == 15) {
+        fprintf(stderr, " ");
+        for (int j = i-15; j <= i; j++) {
+          unsigned char c = edid.raw[j];
+          fprintf(stderr, "%c", (isprint(c) && isascii(c)) ? c : '.');
+        }
+        fprintf(stderr, "\n");
+      }
+    }
+    close(i2cfd);
+    parseEdid(edid);
 
     // for surfaceflinger 
     long actualFrequency = 0;
@@ -459,6 +489,39 @@ int main(int argc, const char **argv)
     printf("[%s:%d] before set_i2c_mux_reset_n\n", __FUNCTION__, __LINE__);
     sensordevice->set_i2c_mux_reset_n(1);
     printf("[%s:%d] before setTestPattern\n", __FUNCTION__, __LINE__);
+    for (int i = 0; i < 4; i++) {
+      int pixclk = (long)edid.timing[i].pixclk * 10000;
+      if ((pixclk > 0) && (pixclk < 148000000)) {
+        nlines = edid.timing[i].nlines;    // number of visible lines
+        npixels = edid.timing[i].npixels;
+        int vblank = edid.timing[i].blines; // number of blanking lines
+        int hblank = edid.timing[i].bpixels;
+        int vsyncoff = edid.timing[i].vsyncoff; // number of lines in FrontPorch (within blanking)
+        int hsyncoff = edid.timing[i].hsyncoff;
+        int vsyncwidth = edid.timing[i].vsyncwidth; // width of Sync (within blanking)
+        int hsyncwidth = edid.timing[i].hsyncwidth;
+
+        fprintf(stderr, "lines %d, pixels %d, vblank %d, hblank %d, vwidth %d, hwidth %d\n",
+             nlines, npixels, vblank, hblank, vsyncwidth, hsyncwidth);
+        fprintf(stderr, "Using pixclk %d calc_pixclk %d npixels %d nlines %d\n",
+                pixclk,
+                60l * (long)(hblank + npixels) * (long)(vblank + nlines),
+                npixels, nlines);
+        status = poller->setClockFrequency(1, pixclk, 0);
+
+hblank--; // needed on zc702
+        hdmidevice->setDeLine(vsyncoff,           // End of FrontPorch
+                                vsyncoff+vsyncwidth,// End of Sync
+                                vblank,             // Start of Visible (start of BackPorch)
+                                vblank + nlines, vblank + nlines / 2); // End
+        hdmidevice->setDePixel(hsyncoff,
+                                hsyncoff+hsyncwidth, hblank,
+                                hblank + npixels, hblank + npixels / 2);
+        break;
+      }
+    }
+
+    fbsize = nlines*npixels*4;
     hdmidevice->setTestPattern(1);
     fmc_imageon_demo_init(argc, argv);
     printf("[%s:%d] passed fmc_imageon_demo_init\n", __FUNCTION__, __LINE__);

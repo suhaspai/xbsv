@@ -22,39 +22,50 @@
 
 
 import Vector::*;
-import Dma::*;
+import MemTypes::*;
 import Leds::*;
+import XADC::*;
+import Pipe::*;
 
-interface Portal#(numeric type slaveAddrWidth, numeric type slaveDataWidth);
+interface Portal#(numeric type numRequests, numeric type numIndications, numeric type slaveDataWidth);
+   method Bit#(32) ifcId();
+   method Bit#(32) ifcType();
+   interface Vector#(numRequests, PipeIn#(Bit#(slaveDataWidth))) requests;
+   interface Vector#(numRequests, Bit#(32))                      requestSizeBits;
+   interface Vector#(numIndications, PipeOut#(Bit#(slaveDataWidth))) indications;
+   interface Vector#(numIndications, Bit#(32))                       indicationSizeBits;
+endinterface
+
+interface MemPortal#(numeric type slaveAddrWidth, numeric type slaveDataWidth);
    method Bit#(32) ifcId();
    method Bit#(32) ifcType();
    interface MemSlave#(slaveAddrWidth,slaveDataWidth) slave;
    interface ReadOnly#(Bool) interrupt;
 endinterface
 
-
-function MemSlave#(_a,_d) getSlave(Portal#(_a,_d) p);
+function MemSlave#(_a,_d) getSlave(MemPortal#(_a,_d) p);
    return p.slave;
 endfunction
 
-function ReadOnly#(Bool) getInterrupt(Portal#(_a,_d) p);
+function ReadOnly#(Bool) getInterrupt(MemPortal#(_a,_d) p);
    return p.interrupt;
 endfunction
 
-function Vector#(16, ReadOnly#(Bool)) getInterruptVector(Vector#(numPortals, Portal#(_a,_d)) portals);
+function Vector#(16, ReadOnly#(Bool)) getInterruptVector(Vector#(numPortals, MemPortal#(_a,_d)) portals);
    Vector#(16, ReadOnly#(Bool)) interrupts = replicate(interface ReadOnly; method Bool _read(); return False; endmethod endinterface);
    for (Integer i = 0; i < valueOf(numPortals); i = i + 1)
       interrupts[i] = getInterrupt(portals[i]);
    return interrupts;
 endfunction
 
-typedef Portal#(16,32) StdPortal;
+typedef MemPortal#(16,32) StdPortal;
 
 interface PortalTop#(numeric type addrWidth, numeric type dataWidth, type pins, numeric type numMasters);
    interface MemSlave#(32,32) slave;
    interface Vector#(numMasters,MemMaster#(addrWidth, dataWidth)) masters;
    interface Vector#(16,ReadOnly#(Bool)) interrupt;
    interface LEDS             leds;
+   interface XADC             xadc;
    interface pins             pins;
 endinterface
 

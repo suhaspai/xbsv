@@ -63,23 +63,23 @@ set_property LOC AD11 [get_ports { CLK_sys_clk_n }]
 set_property LOC K28  [get_ports { CLK_user_clk_p }]
 set_property LOC K29  [get_ports { CLK_user_clk_n }]
 
-set_property LOC M6   [get_ports { PCIE_rxp_i[0] }]
-set_property LOC P6   [get_ports { PCIE_rxp_i[1] }]
-set_property LOC R4   [get_ports { PCIE_rxp_i[2] }]
-set_property LOC T6   [get_ports { PCIE_rxp_i[3] }]
-set_property LOC V6   [get_ports { PCIE_rxp_i[4] }]
-set_property LOC W4   [get_ports { PCIE_rxp_i[5] }]
-set_property LOC Y6   [get_ports { PCIE_rxp_i[6] }]
-set_property LOC AA4  [get_ports { PCIE_rxp_i[7] }]
+set_property LOC M6   [get_ports { PCIE_rxp_v[0] }]
+set_property LOC P6   [get_ports { PCIE_rxp_v[1] }]
+set_property LOC R4   [get_ports { PCIE_rxp_v[2] }]
+set_property LOC T6   [get_ports { PCIE_rxp_v[3] }]
+set_property LOC V6   [get_ports { PCIE_rxp_v[4] }]
+set_property LOC W4   [get_ports { PCIE_rxp_v[5] }]
+set_property LOC Y6   [get_ports { PCIE_rxp_v[6] }]
+set_property LOC AA4  [get_ports { PCIE_rxp_v[7] }]
 
-set_property LOC M5   [get_ports { PCIE_rxn_i[0] }]
-set_property LOC P5   [get_ports { PCIE_rxn_i[1] }]
-set_property LOC R3   [get_ports { PCIE_rxn_i[2] }]
-set_property LOC T5   [get_ports { PCIE_rxn_i[3] }]
-set_property LOC V5   [get_ports { PCIE_rxn_i[4] }]
-set_property LOC W3   [get_ports { PCIE_rxn_i[5] }]
-set_property LOC Y5   [get_ports { PCIE_rxn_i[6] }]
-set_property LOC AA3  [get_ports { PCIE_rxn_i[7] }]
+set_property LOC M5   [get_ports { PCIE_rxn_v[0] }]
+set_property LOC P5   [get_ports { PCIE_rxn_v[1] }]
+set_property LOC R3   [get_ports { PCIE_rxn_v[2] }]
+set_property LOC T5   [get_ports { PCIE_rxn_v[3] }]
+set_property LOC V5   [get_ports { PCIE_rxn_v[4] }]
+set_property LOC W3   [get_ports { PCIE_rxn_v[5] }]
+set_property LOC Y5   [get_ports { PCIE_rxn_v[6] }]
+set_property LOC AA3  [get_ports { PCIE_rxn_v[7] }]
 
 set_property LOC L4   [get_ports { PCIE_txp[0] }]
 set_property LOC M2   [get_ports { PCIE_txp[1] }]
@@ -125,7 +125,7 @@ set_property PULLUP     true        [get_ports { RST_N_pci_sys_reset_n }]
 # Please refer to the Virtex-7 GT Transceiver User Guide
 # (UG) for guidelines regarding clock resource selection.
 #
-set_property LOC IBUFDS_GTE2_X0Y1  [get_cells { *x7pcie_pci_clk_100mhz_buf }]
+set_property LOC IBUFDS_GTE2_X0Y1  [get_cells { *pci_clk_100mhz_buf }]
 set_property LOC MMCME2_ADV_X1Y1 [get_cells -hier -filter { NAME =~ *clk_gen_pll }]
 
 #
@@ -193,18 +193,8 @@ endgroup
 ######################################################################################################
 
 # # clocks
-create_clock -name bscan_refclk -period 20 [get_pins top_x7pcie_bridge_csr_pcieBscanBram_bscan/TCK]
-create_clock -name pci_refclk -period 10 [get_pins *x7pcie_pci_clk_100mhz_buf/O]
+create_clock -name bscan_refclk -period 20 [get_pins pciehost/traceif/*_bscan/TCK]
+#create_clock -name pci_refclk -period 10 [get_pins *pci_clk_100mhz_buf/O]
 
 ## no longer needed?
-create_clock -name pci_extclk -period 10 [get_pins top_x7pcie_pcie_ep/pcie_7x_i/inst/inst/gt_top_i/pipe_wrapper_i/pipe_lane[0].gt_wrapper_i/gtx_channel.gtxe2_channel_i/TXOUTCLK]
-#set_false_path -through [get_nets {*/pcie_7x_v2_1_i/gt_top_i/pipe_wrapper_i/user_resetdone*}]
-
-set_clock_groups -name ___clk_groups_generated_0_1_0_0_0 -physically_exclusive -group [get_clocks clk_125mhz] -group [get_clocks clk_250mhz]
-
-#set_max_delay -from [get_clocks noc_clk] -to [get_clocks clk_userclk2] 8.000 -datapath_only
-#set_max_delay -from [get_clocks clk_userclk2] -to [get_clocks noc_clk] 8.000 -datapath_only
-#set_max_delay -from [get_clocks cclock] -to [get_clocks core_clock] 20.000 -datapath_only
-#set_max_delay -from [get_clocks uclock] -to [get_clocks core_clock] 20.000 -datapath_only
-#set_max_delay -from [get_clocks core_clock] -to [get_clocks cclock] 20.000 -datapath_only
-#set_max_delay -from [get_clocks core_clock] -to [get_clocks uclock] 20.000 -datapath_only
+create_clock -name pci_extclk -period 10 [get_pins *ep7/pcie_ep/inst/inst/gt_top_i/pipe_wrapper_i/pipe_lane[0].gt_wrapper_i/gtx_channel.gtxe2_channel_i/TXOUTCLK]

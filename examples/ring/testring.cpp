@@ -36,7 +36,7 @@
 #include "GeneratedTypes.h"
 
 RingRequestProxy *ring = 0;
-DmaConfigProxy *dma = 0;
+DmaConfigProxy *dmap = 0;
 
 PortalAlloc *cmdAlloc;
 PortalAlloc *statusAlloc;
@@ -251,7 +251,9 @@ void StatusPoll(void)
   int i;
   uint64_t *msg;
   long int rc;
-  rc = (long int) portalExec_event(0);
+  rc = (long int) portalExec_poll(0);
+  if ((long)rc >= 0)
+      rc = (long int) portalExec_event();
   assert(rc == 0);
   if (ring_init_done) {
     msg = ring_next(&status_ring);
@@ -271,7 +273,9 @@ void *statusThreadProc(void *arg)
   printf("Status thread running\n");
   for (;;) {
     StatusPoll();
-    rc = (long int) portalExec_event(0);
+    rc = (long int) portalExec_poll(0);
+    if ((long)rc >= 0)
+        rc = (long int) portalExec_event();
     assert(rc == 0);
   }
 }
@@ -473,7 +477,8 @@ int main(int argc, const char **argv)
   fprintf(stderr, "%s %s\n", __DATE__, __TIME__);
   completion_list_init();
   ring = new RingRequestProxy(IfcNames_RingRequest);
-  dma = new DmaConfigProxy(IfcNames_ObjectRequest);
+  dmap = new DmaConfigProxy(IfcNames_ObjectRequest);
+  DmaManager *dma = new DmaManager(dmap);
   dmaIndication = new DmaIndication(dma, IfcNames_DmaIndication);
   ringIndication = new RingIndication(IfcNames_RingIndication);
 

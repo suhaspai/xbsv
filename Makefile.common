@@ -1,5 +1,8 @@
 #################################################################################################
 
+bozotarget:
+	@echo "Makefile.common: please invoke with make gen.boardname"
+
 ## use "make gen.board" to generate the build directory
 gen.%:
 	make BOARD=$* gentarget prebuild
@@ -14,7 +17,21 @@ run.%:
 	make XBSV_DEBUG=1 $*
 
 ifeq ($(origin XBSVDIR),undefined)
-XBSVDIR=../..
+XBSVDIR=$(shell cd ../..; /bin/pwd)
+endif
+ifneq ($(origin IPDIR),undefined)
+XBSVFLAGS += --ipdir=$(IPDIR)
+endif
+ifndef NUMBER_OF_MASTERS
+NUMBER_OF_MASTERS=1
+endif
+XBSVFLAGS += --bscflags " -D NumberOfMasters=$(NUMBER_OF_MASTERS)"
+
+ifneq ($(NUMBER_OF_MASTERS), 0)
+S2H += DmaConfig
+H2S += DmaIndication
+BSVFILES += $(XBSVDIR)/bsv/PortalMemory.bsv
+CPPFILES += $(XBSVDIR)/cpp/dmaManager.cpp
 endif
 
 all bits verilog implementation android_exe bsim bsim_exe ubuntu_exe xsim xsimrun: gentarget
@@ -24,30 +41,47 @@ ifeq ($(origin TOP),undefined)
     ifeq ($(BOARD),bluesim)
     TOP=$(XBSVDIR)/bsv/BsimTop.bsv
     MKTOP=mkBsimTop
+    XBSVFLAGS += -D BsimHostTypeIF
     endif
     ifeq ($(BOARD),ac701)
     TOP=$(XBSVDIR)/bsv/PcieTop.bsv
     MKTOP=mkPcieTop
+    XBSVFLAGS += -D PcieHostTypeIF
     endif
     ifeq ($(BOARD),kc705)
     TOP=$(XBSVDIR)/bsv/PcieTop.bsv
     MKTOP=mkPcieTop
+    XBSVFLAGS += -D PcieHostTypeIF
     endif
     ifeq ($(BOARD),vc707)
     TOP=$(XBSVDIR)/bsv/PcieTop.bsv
     MKTOP=mkPcieTop
+    XBSVFLAGS += -D PcieHostTypeIF
+    endif
+    ifeq ($(BOARD),v2000t)
+    TOP=$(XBSVDIR)/bsv/PcieTop.bsv
+    MKTOP=mkPcieTop
+    XBSVFLAGS += -D PcieHostTypeIF
     endif
     ifeq ($(BOARD),zedboard)
     TOP=$(XBSVDIR)/bsv/ZynqTop.bsv
     MKTOP=mkZynqTop
+    XBSVFLAGS += -D ZynqHostTypeIF
     endif
     ifeq ($(BOARD),zc702)
     TOP=$(XBSVDIR)/bsv/ZynqTop.bsv
     MKTOP=mkZynqTop
+    XBSVFLAGS += -D ZynqHostTypeIF
     endif
     ifeq ($(BOARD),zc706)
-    TOP=$(XBSVDIR)/bsv/Zc706Top.bsv
+    TOP=$(XBSVDIR)/bsv/ZynqTop.bsv
     MKTOP=mkZynqTop
+    XBSVFLAGS += -D ZynqHostTypeIF
+    endif
+    ifeq ($(BOARD),zynq100)
+    TOP=$(XBSVDIR)/bsv/ZynqTop.bsv
+    MKTOP=mkZynqTop
+    XBSVFLAGS += -D ZynqHostTypeIF
     endif
 endif
 

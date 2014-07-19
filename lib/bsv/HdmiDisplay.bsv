@@ -22,27 +22,24 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import FIFO::*;
-import FIFOF::*;
+import BRAMFIFO::*;
 import Vector::*;
 import Clocks::*;
 import GetPut::*;
-import PCIE::*;
-import GetPutWithClocks::*;
+import ClientServer::*;
 import Connectable::*;
-import PortalMemory::*;
-import Dma::*;
-import DmaUtils::*;
-import AxiMasterSlave::*;
+import MemTypes::*;
 import MemreadEngine::*;
 import HDMI::*;
 import XADC::*;
 import YUV::*;
+import BlueScope::*;
 
 interface HdmiDisplayRequest;
-   method Action startFrameBuffer0(Int#(32) base);
+   method Action startFrameBuffer(Int#(32) base, UInt#(32) byteCount);
+   method Action stopFrameBuffer();
    method Action getTransferStats();
-   method Action setTraceTransfers(Bool trace);
+   method Action setTraceTransfers(Bit#(1) trace);
 endinterface
 interface HdmiDisplayIndication;
    method Action transferStarted(Bit#(32) count);
@@ -51,78 +48,116 @@ interface HdmiDisplayIndication;
 endinterface
 
 interface HdmiDisplay;
+`ifdef HDMI_BLUESCOPE
+   interface BlueScopeRequest  bluescopeRequest;
+   interface ObjectWriteClient#(64) bluescopeWriteClient;
+`endif
     interface HdmiDisplayRequest displayRequest;
     interface HdmiInternalRequest internalRequest;
     interface ObjectReadClient#(64) dmaClient;
-    interface HDMI hdmi;
+    interface HDMI#(Bit#(HdmiBits)) hdmi;
     interface XADC xadc;
 endinterface
 
 module mkHdmiDisplay#(Clock hdmi_clock,
 		      HdmiDisplayIndication hdmiDisplayIndication,
-		      HdmiInternalIndication hdmiInternalIndication)(HdmiDisplay);
-    Clock defaultClock <- exposeCurrentClock;
-    Reset defaultReset <- exposeCurrentReset;
-    Reset hdmi_reset <- mkAsyncReset(2, defaultReset, hdmi_clock);
-    Reg#(Bool) sendVsyncIndication <- mkReg(False);
-    SyncPulseIfc vsyncPulse <- mkSyncHandshake(hdmi_clock, hdmi_reset, defaultClock);
-    Reg#(Bit#(1)) bozobit <- mkReg(0, clocked_by hdmi_clock, reset_by hdmi_reset);
+		      HdmiInternalIndication hdmiInternalIndication
+`ifdef HDMI_BLUESCOPE
+		      , BlueScopeIndication bluescopeIndication
+`endif
+                      )(HdmiDisplay);
+   Clock defaultClock <- exposeCurrentClock;
+   Reset defaultReset <- exposeCurrentReset;
+   Reset hdmi_reset <- mkAsyncReset(2, defaultReset, hdmi_clock);
+   MakeResetIfc fifo_reset <- mkReset(2, True, defaultClock);
+   Reset fifo_reset_hdmi <- mkAsyncReset(2, fifo_reset.new_rst, hdmi_clock);
 
-    Reg#(Maybe#(Bit#(32))) referenceReg <- mkReg(tagged Invalid);
-    FIFOF#(Bit#(64))   mrFifo  <- mkSizedFIFOF(32);
-    MemreadEngine#(64) memreadEngine <- mkMemreadEngine(8, mrFifo);
+   Reg#(UInt#(24)) byteCountReg <- mkReg(1080*1920);
 
-    HdmiGenerator hdmiGen <- mkHdmiGenerator(defaultClock, defaultReset,
-					     vsyncPulse, hdmiInternalIndication, clocked_by hdmi_clock, reset_by hdmi_reset);
-   
-   SyncFIFOIfc#(Bit#(64)) synchronizer <- mkSyncFIFO(32, defaultClock, defaultReset, hdmi_clock);
-   rule doGet;
-      let v = mrFifo.first();
-      mrFifo.deq();
+   Reg#(Bool) sendVsyncIndication <- mkReg(False);
+   SyncPulseIfc startDMA <- mkSyncHandshake(hdmi_clock, hdmi_reset, defaultClock);
+   Reg#(Bit#(1)) bozobit <- mkReg(0, clocked_by hdmi_clock, reset_by hdmi_reset);
+
+   Reg#(Maybe#(Bit#(32))) referenceReg <- mkReg(tagged Invalid);
+   MemreadEngine#(64,16) memreadEngine <- mkMemreadEngine;
+
+   HdmiGenerator#(Rgb888) hdmiGen <- mkHdmiGenerator(defaultClock, defaultReset,
+			startDMA, hdmiInternalIndication, clocked_by hdmi_clock, reset_by hdmi_reset);
+`ifndef ZC706
+   Rgb888ToYyuv converter <- mkRgb888ToYyuv(clocked_by hdmi_clock, reset_by fifo_reset_hdmi);
+   mkConnection(hdmiGen.rgb888, converter.rgb888);
+   HDMI#(Bit#(HdmiBits)) hdmisignals <- mkHDMI(converter.yyuv, clocked_by hdmi_clock, reset_by hdmi_reset);
+`else
+   HDMI#(Bit#(HdmiBits)) hdmisignals <- mkHDMI(hdmiGen.rgb888, clocked_by hdmi_clock, reset_by hdmi_reset);
+`endif   
+`ifdef HDMI_BLUESCOPE
+   let bluescope <- mkSyncBlueScope(65536, bluescopeIndication, hdmi_clock, hdmi_reset, defaultClock, defaultReset);
+   MIMO#(1, 16, 64, Bit#(4)) mimo <- mkMIMO(MIMOConfiguration { unguarded: False, bram_based: False }, clocked_by hdmi_clock, reset_by hdmi_reset);
+   Reg#(Bool) triggered <- mkReg(False, clocked_by hdmi_clock, reset_by hdmi_reset);
+   rule toGearbox if ((hdmisignals.hdmi_vsync == 1) || triggered);
+      Bit#(4) v = 0;
+      v[0] = hdmisignals.hdmi_vsync;
+      v[1] = hdmisignals.hdmi_de;
+      v[2] = hdmisignals.hdmi_hsync;
+      v[3] = hdmisignals.hdmi_vsync;
+      triggered <= True;
+      if (mimo.enqReadyN(1))
+	 mimo.enq(1, cons(v,nil));
+      else
+	 $display("mimo.stalled mimo.count=%d", mimo.count);
+   endrule
+   rule gearboxToBlueScope if (mimo.deqReadyN(16));
+      Bit#(64) v = pack(mimo.first());
+      mimo.deq(16);
+      bluescope.dataIn(v, v);
+   endrule
+`endif
+
+   SyncFIFOIfc#(Bit#(64)) synchronizer <- mkSyncBRAMFIFO(1024, defaultClock, fifo_reset.new_rst, hdmi_clock, fifo_reset_hdmi);
+   Reg#(Bool) evenOdd <- mkReg(True, clocked_by hdmi_clock, reset_by fifo_reset_hdmi);
+   Reg#(Bit#(32)) savedPixelReg <- mkReg(0, clocked_by hdmi_clock, reset_by fifo_reset_hdmi);
+
+   rule fromMemread;
+      let v <- toGet(memreadEngine.dataPipes[0]).get;
       synchronizer.enq(v);
    endrule
-   Reg#(Bit#(1)) evenOdd <- mkReg(0, clocked_by hdmi_clock, reset_by hdmi_reset);
-   Reg#(Vector#(2,Bit#(32))) doublePixelReg <- mkReg(unpack(0), clocked_by hdmi_clock, reset_by hdmi_reset);
+
    rule doPut;
-      Vector#(2,Bit#(32)) doublePixel = doublePixelReg;
-      let pixel = doublePixel[evenOdd];
-      if (evenOdd == 0) begin
-	 doublePixel = unpack(synchronizer.first);
+      let pixel = savedPixelReg;
+      if (evenOdd) begin
+	 Vector#(2,Bit#(32)) doublePixel = unpack(synchronizer.first);
 	 synchronizer.deq;
+         savedPixelReg <= doublePixel[1];
 	 pixel = doublePixel[0];
       end
-      doublePixelReg <= doublePixel;
-      evenOdd <= evenOdd + 1;
+      evenOdd <= !evenOdd;
       hdmiGen.request.put(pixel);
    endrule      
 
-   FIFOF#(Bool) vsyncFifo <- mkFIFOF();
-   rule vsyncrule if (vsyncPulse.pulse());
-      if (vsyncFifo.notFull())
-	 vsyncFifo.enq(True);
-   endrule
    Reg#(Bit#(32)) transferCount <- mkReg(0);
+   Reg#(Bit#(32)) transferCyclesSnapshot <- mkReg(0);
    Reg#(Bit#(32)) transferCycles <- mkReg(0);
    Reg#(Bit#(48)) transferSumOfCycles<- mkReg(0);
 
-   Reg#(Bool) traceTransfers <- mkReg(False);
-   rule notransfer if (referenceReg matches tagged Invalid);
-      vsyncFifo.deq();
+   rule vsyncrule if (startDMA.pulse());
+      fifo_reset.assertReset();
    endrule
-   rule startTransfer if (referenceReg matches tagged Valid .reference);
-      memreadEngine.start(reference, 0, (1080*1920)*4, 64);
+
+   Reg#(Bool) traceTransfers <- mkReg(False);
+   rule startTransfer if (startDMA.pulse() &&& referenceReg matches tagged Valid .reference);
+      memreadEngine.readServers[0].request.put(MemengineCmd{pointer:reference, base:0, len:pack(extend(byteCountReg)), burstLen:64});
       if (traceTransfers)
 	 hdmiDisplayIndication.transferStarted(transferCount);
-      transferCycles <= 0;
-      vsyncFifo.deq();
+      transferCyclesSnapshot <= transferCycles;
    endrule
    rule countCycles;
       transferCycles <= transferCycles + 1;
    endrule
    rule finishTransferRule;
-      let b <- memreadEngine.finish();
+      let b <- memreadEngine.readServers[0].response.get;
       transferCount <= transferCount + 1;
-      transferSumOfCycles <= transferSumOfCycles + extend(transferCycles);
+      let tc = transferCycles - transferCyclesSnapshot;
+      transferSumOfCycles <= transferSumOfCycles + extend(tc);
       if (traceTransfers)
 	 hdmiDisplayIndication.transferFinished(transferCount);
    endrule
@@ -132,27 +167,34 @@ module mkHdmiDisplay#(Clock hdmi_clock,
     endrule
 
     interface HdmiDisplayRequest displayRequest;
-	method Action startFrameBuffer0(Int#(32) base);
-	    $display("startFrameBuffer %h", base);
-            referenceReg <= tagged Valid truncate(pack(base));
-	    hdmiGen.control.setTestPattern(0);
+	method Action startFrameBuffer(Int#(32) base, UInt#(32) byteCount);
+	   byteCountReg <= truncate(byteCount);
+	   $display("startFrameBuffer %h", base);
+           referenceReg <= tagged Valid truncate(pack(base));
 	endmethod
-       method Action getTransferStats();
-          hdmiDisplayIndication.transferStats(transferCount, transferCycles, extend(transferSumOfCycles));
+       method Action stopFrameBuffer();
+	  referenceReg <= tagged Invalid;
        endmethod
-       method Action setTraceTransfers(Bool trace);
-	  traceTransfers <= trace;
+       method Action getTransferStats();
+          hdmiDisplayIndication.transferStats(transferCount, transferCycles-transferCyclesSnapshot, extend(transferSumOfCycles));
+       endmethod
+       method Action setTraceTransfers(Bit#(1) trace);
+	  traceTransfers <= unpack(trace);
        endmethod
     endinterface: displayRequest
 
     interface ObjectReadClient dmaClient = memreadEngine.dmaClient;
-    interface HDMI hdmi = hdmiGen.hdmi;
+    interface HDMI hdmi = hdmisignals;
     interface HdmiInternalRequest internalRequest = hdmiGen.control;
+`ifdef HDMI_BLUESCOPE
+    interface BlueScopeRequest bluescopeRequest = bluescope.requestIfc;
+    interface ObjectWriteClient bluescopeWriteClient = bluescope.writeClient;
+`endif
     interface XADC xadc;
         method Bit#(4) gpio;
-            return { bozobit, hdmiGen.hdmi.vsync,
-                hdmiGen.hdmi.data[8], hdmiGen.hdmi.data[0]};
-                //hdmiGen.hdmi.hsync, hdmi_de};
+            return { bozobit, hdmisignals.hdmi_vsync,
+                //hdmisignals.hdmi_data[8], hdmisignals.hdmi_data[0]};
+                hdmisignals.hdmi_hsync, hdmisignals.hdmi_de};
         endmethod
     endinterface: xadc
 endmodule

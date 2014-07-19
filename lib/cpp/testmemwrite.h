@@ -3,7 +3,7 @@
 #ifndef _TESTMEMWRITE_H_
 #define _TESTMEMWRITE_H_
 
-#include "sock_fd.h"
+#include "sock_utils.h"
 #include "StdDmaIndication.h"
 #include "DmaConfigProxy.h"
 #include "GeneratedTypes.h" 
@@ -13,12 +13,20 @@
 
 sem_t done_sem;
 #ifdef MMAP_HW
-int numWords = 16 << 18;
+int numWords = 0x1240000/4; // make sure to allocate at least one entry of each size
 #else
-int numWords = 16 << 10;
+int numWords = 0x124000/4;
 #endif
 size_t test_sz  = numWords*sizeof(unsigned int);
 size_t alloc_sz = test_sz;
+
+int burstLen = 16;
+#ifdef MMAP_HW
+int iterCnt = 128;
+#else
+int iterCnt = 2;
+#endif
+
 
 class MemwriteIndication : public MemwriteIndicationWrapper
 {
@@ -39,7 +47,7 @@ public:
 };
 
 MemwriteRequestProxy *device = 0;
-DmaConfigProxy *dma = 0;
+DmaConfigProxy *dmap = 0;
 
 MemwriteIndication *deviceIndication = 0;
 DmaIndication *dmaIndication = 0;
@@ -78,7 +86,8 @@ void parent(int rd_sock, int wr_sock)
   fprintf(stderr, "parent::%s %s\n", __DATE__, __TIME__);
 
   device = new MemwriteRequestProxy(IfcNames_MemwriteRequest);
-  dma = new DmaConfigProxy(IfcNames_DmaConfig);
+  dmap = new DmaConfigProxy(IfcNames_DmaConfig);
+  DmaManager *dma = new DmaManager(dmap);
 
   deviceIndication = new MemwriteIndication(IfcNames_MemwriteIndication);
   dmaIndication = new DmaIndication(dma, IfcNames_DmaIndication);
@@ -107,18 +116,12 @@ void parent(int rd_sock, int wr_sock)
   //   fprintf(stderr, "%lx %lx\n", dstAlloc->entries[i].dma_address, dstAlloc->entries[i].length);
 
   // sleep(1);
-  // dma->addrRequest(ref_dstAlloc, 2*sizeof(unsigned int));
+  // dmap->addrRequest(ref_dstAlloc, 2*sizeof(unsigned int));
   // sleep(1);
 
 
   fprintf(stderr, "parent::starting write %08x\n", numWords);
   start_timer(0);
-  int burstLen = 16;
-#ifdef MMAP_HW
-  int iterCnt = 128;
-#else
-  int iterCnt = 3;
-#endif
   //portalTrace_start();
   device->startWrite(ref_dstAlloc, numWords, burstLen, iterCnt);
   sem_wait(&done_sem);

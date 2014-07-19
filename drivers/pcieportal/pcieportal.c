@@ -20,6 +20,10 @@
 #include <asm/uaccess.h>        /* copy_to_user, copy_from_user */
 
 #include "pcieportal.h"
+#include "portal.h"
+
+/* flag for adding 'direct call' interface to driver */
+//#define SUPPORT_MANUAL_INTERFACE
 
 /* stem used for module and device names */
 #define DEV_NAME "fpga"
@@ -32,10 +36,6 @@
 
 /* XBSV device ID */
 #define XBSV_DEVICE_ID 0xc100
-
-/* Number of boards to support */
-#define NUM_BOARDS 1
-#define NUM_PORTALS 16
 
 /* CSR address space offsets */
 #define CSR_ID                        (   0 << 2) /* 64-bit */
@@ -50,36 +50,22 @@
 #define CSR_TLPDATABRAMRESPONSESLICE5 ( 781 << 2)
 #define CSR_TLPFROMPCIEWRADDRREG      ( 792 << 2)
 #define CSR_TLPTOPCIEWRADDRREG        ( 793 << 2)
-#define CSR_RESETISASSERTED           ( 795 << 2)
+/* MSIX must be in separate 4kb page */
 #define CSR_MSIX_ADDR_LO              (1024 << 2)
 #define CSR_MSIX_ADDR_HI              (1025 << 2)
 #define CSR_MSIX_MSG_DATA             (1026 << 2)
 #define CSR_MSIX_MASKED               (1027 << 2)
 
-/*
- * Per-device data
- */
-typedef struct {
-        unsigned int      portal_number;
-        struct tBoard    *board;
-        void             *virt;
-        wait_queue_head_t wait_queue; /* used for interrupt notifications */
-        dma_addr_t        dma_handle;
-        struct cdev       cdev; /* per-portal cdev structure */
-} tPortal;
-
-typedef struct tBoard {
-        void __iomem     *bar0io, *bar1io, *bar2io; /* bars */
-        struct pci_dev   *pci_dev; /* pci device pointer */
-        tPortal           portal[NUM_PORTALS];
-        tBoardInfo        info; /* board identification fields */
-        unsigned int      irq_num;
-        unsigned int      open_count;
-} tBoard;
 
 /* static device data */
 static dev_t device_number;
 static struct class *pcieportal_class = NULL;
+typedef struct extra_info {
+        wait_queue_head_t wait_queue; /* used for interrupt notifications */
+        dma_addr_t        dma_handle;
+        struct cdev       cdev; /* per-portal cdev structure */
+} extra_info ;
+static struct extra_info extra_portal_info[NUM_PORTALS * NUM_BOARDS];
 static tBoard board_map[NUM_BOARDS + 1];
 static unsigned long long expected_magic = 'B' | ((unsigned long long) 'l' << 8)
     | ((unsigned long long) 'u' << 16) | ((unsigned long long) 'e' << 24)
@@ -94,7 +80,7 @@ static irqreturn_t intr_handler(int irq, void *p)
         tPortal *this_portal = p;
 
         //printk(KERN_INFO "%s_%d: interrupt!\n", DEV_NAME, this_portal->portal_number);
-        wake_up_interruptible(&(this_portal->wait_queue)); 
+        wake_up_interruptible(&(this_portal->extra->wait_queue)); 
         return IRQ_HANDLED;
 }
 
@@ -118,7 +104,7 @@ static int pcieportal_open(struct inode *inode, struct file *filp)
                 printk(KERN_ERR "%s_%d: Unable to locate board\n", DEV_NAME, this_board_number);
                 return -ENXIO;
         }
-        init_waitqueue_head(&(this_portal->wait_queue));
+        init_waitqueue_head(&(this_portal->extra->wait_queue));
         filp->private_data = (void *) &this_board->portal[this_portal_number];
         /* increment the open file count */
         this_board->open_count += 1; 
@@ -133,7 +119,7 @@ static int pcieportal_release(struct inode *inode, struct file *filp)
 {
         tPortal *this_portal = (tPortal *) filp->private_data;
         /* decrement the open file count */
-        init_waitqueue_head(&(this_portal->wait_queue));
+        init_waitqueue_head(&(this_portal->extra->wait_queue));
         this_portal->board->open_count -= 1;
         //printk(KERN_INFO "%s_%d: Closed device file\n", DEV_NAME, this_board_number);
         return 0;                /* success */
@@ -143,12 +129,18 @@ static int pcieportal_release(struct inode *inode, struct file *filp)
 static unsigned int pcieportal_poll(struct file *filp, poll_table *poll_table)
 {
         unsigned int mask = 0;
+        uint32_t tc = 1;
         tPortal *this_portal = (tPortal *) filp->private_data;
         //tBoard *this_board = this_portal->board;
 
         //printk(KERN_INFO "%s_%d: poll function called\n", DEV_NAME, this_board->info.board_number);
-        poll_wait(filp, &this_portal->wait_queue, poll_table);
-	mask |= POLLIN  | POLLRDNORM; /* readable */
+        poll_wait(filp, &this_portal->extra->wait_queue, poll_table);
+        if (this_portal->count) {
+            tc = *this_portal->count;
+            //printk(KERN_INFO "%s_%d: count %x\n", DEV_NAME, this_portal->portal_number, tc);
+        }
+        if (tc)
+            mask |= POLLIN  | POLLRDNORM; /* readable */
         //mask |= POLLOUT | POLLWRNORM; /* writable */
         //printk(KERN_INFO "%s_%d: poll return status is %x\n", DEV_NAME, this_board->info.board_number, mask);
         return mask;
@@ -193,12 +185,6 @@ static long pcieportal_ioctl(struct file *filp, unsigned int cmd, unsigned long 
                              ioread32(this_board->bar0io + CSR_MSIX_MSG_DATA  + 16*i));
                 }
                 err = copy_to_user((void __user *) arg, &info, sizeof(tBoardInfo));
-                break;
-        case BNOC_SOFT_RESET:
-                printk(KERN_INFO "%s: /dev/%s_%d soft reset\n",
-                       DEV_NAME, DEV_NAME, this_board->info.board_number);
-		// reset the portal
-		iowrite32(1, this_board->bar0io + CSR_RESETISASSERTED); 
                 break;
         case BNOC_IDENTIFY_PORTAL:
                 {
@@ -248,6 +234,29 @@ static long pcieportal_ioctl(struct file *filp, unsigned int cmd, unsigned long 
                 }
                 }
                 break;
+#ifdef SUPPORT_MANUAL_INTERFACE
+        case PCIE_MANUAL_READ:
+                {
+                /* read 32 bit value from specified offset in bar2 */
+		tReadInfo readInfo;
+                err = copy_from_user(&readInfo, (void __user *) arg, sizeof(readInfo));
+                if (!err) {
+                         readInfo.value = ioread32(this_board->bar2io + readInfo.offset);
+                         err = copy_to_user((void __user *) arg, &readInfo, sizeof(readInfo));
+                }
+                break;
+                }
+        case PCIE_MANUAL_WRITE:
+                {
+                /* write 32 bit value to specified offset in bar2 */
+		tWriteInfo writeInfo;
+                err = copy_from_user(&writeInfo, (void __user *) arg, sizeof(writeInfo));
+                if (!err) {
+                         iowrite32(writeInfo.value, this_board->bar2io + writeInfo.offset);
+                }
+                }
+                break;
+#endif
         default:
                 return -ENOTTY;
         }
@@ -265,7 +274,7 @@ static int portal_mmap(struct file *filp, struct vm_area_struct *vma)
         if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
                 return -EINVAL;
         if (vma->vm_pgoff < 16) {
-                off = pci_dev->resource[2].start + (1 << 16) * this_portal->portal_number;
+                off = pci_dev->resource[2].start + PORTAL_BASE_OFFSET * this_portal->portal_number;
                 printk("portal_mmap portal_number=%d board_start=%012lx portal_start=%012lx\n",
                      this_portal->portal_number, (long) pci_dev->resource[2].start, off);
                 vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
@@ -274,13 +283,13 @@ static int portal_mmap(struct file *filp, struct vm_area_struct *vma)
         } else {
                 if (!this_portal->virt) {
                         this_portal->virt = dma_alloc_coherent(&pci_dev->dev,
-                             vma->vm_end - vma->vm_start, &this_portal->dma_handle, GFP_ATOMIC);
-                        //this_portal->virt =pci_alloc_consistent(pci_dev, 1<<16, &this_portal->dma_handle);
+                             vma->vm_end - vma->vm_start, &this_portal->extra->dma_handle, GFP_ATOMIC);
+                        //this_portal->virt =pci_alloc_consistent(pci_dev, PORTAL_BASE_OFFSET, &this_portal->extra->dma_handle);
                         printk("dma_alloc_coherent virt=%p dma_handle=%p\n",
-                             this_portal->virt, (void *) this_portal->dma_handle);
+                             this_portal->virt, (void *) this_portal->extra->dma_handle);
                 }
                 //vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-                off = this_portal->dma_handle;
+                off = this_portal->extra->dma_handle;
         }
         vma->vm_flags |= VM_IO;
         if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
@@ -307,9 +316,16 @@ static int board_activate(int activate, tBoard *this_board, struct pci_dev *dev)
         unsigned long long magic_num;
 	int num_entries = 16;
 	struct msix_entry msix_entries[16];
+printk("[%s:%d]\n", __FUNCTION__, __LINE__);
+        for (i = 0; i < NUM_PORTALS; i++)
+        	if (!this_board->portal[i].extra) {
+                        printk(KERN_ERR "%s: extra not initialized!!! %s\n", DEV_NAME, pci_name(dev));
+                        err = -EFAULT;
+                        goto err_exit;
+                }
         if (activate) {
         	for (i = 0; i < NUM_PORTALS; i++)
-        		init_waitqueue_head(&(this_board->portal[i].wait_queue));
+        		init_waitqueue_head(&(this_board->portal[i].extra->wait_queue));
                 this_board->pci_dev = dev;
                 /* enable the PCI device */
                 if (pci_enable_device(dev)) {
@@ -333,6 +349,9 @@ static int board_activate(int activate, tBoard *this_board, struct pci_dev *dev)
                 rc = pci_request_region(dev, 2, "bar2");
                 printk("reserving region bar2 rc=%d\n", rc);
                 /* map BARs */
+#ifdef SUPPORT_MANUAL_INTERFACE
+// map all of bar2
+#endif
                 this_board->bar0io = pci_iomap(dev, 0, 0);
                 printk("bar0io=%p\n", this_board->bar0io);
                 this_board->bar1io = pci_iomap(dev, 1, 0);
@@ -376,6 +395,20 @@ static int board_activate(int activate, tBoard *this_board, struct pci_dev *dev)
 			err = -EFAULT;
                         goto BARS_MAPPED_label;
 		}
+#if 0
+{
+int i;
+int pos = pci_find_capability(dev, PCI_CAP_ID_MSIX);
+for (i = 0; i < 10; i++) {
+        u16 control;
+        pci_read_config_word(dev, pos + i * 2, &control);
+        printk("[%s:%d] [%x] = %x\n", __FUNCTION__, __LINE__, i*2, control);
+}
+int nr_entries = 0; //pci_msix_table_size(dev);
+printk("[%s:%d] nr_entries %x msi %x msix %x\n", __FUNCTION__, __LINE__, nr_entries, dev->msi_enabled, dev->msix_enabled);
+
+}
+#endif
 		this_board->irq_num = msix_entries[0].vector;
 		printk(KERN_INFO "%s: Using MSIX interrupts num_entries=%d check_device\n", DEV_NAME, num_entries);
 		for (i = 0; i < num_entries; i++)
@@ -399,9 +432,11 @@ static int board_activate(int activate, tBoard *this_board, struct pci_dev *dev)
                                   MINOR(device_number) + fpga_number);
                         this_board->portal[dn].portal_number = dn;
                         this_board->portal[dn].board = this_board;
+                        if (this_board->bar2io)
+                                this_board->portal[dn].count = (volatile uint32_t *)(this_board->bar2io + 0x10000 * dn + 0xc000);
                         /* add the device operations */
-                        cdev_init(&this_board->portal[dn].cdev, &pcieportal_fops);
-                        if (cdev_add(&this_board->portal[dn].cdev, this_device_number, 1)) {
+                        cdev_init(&this_board->portal[dn].extra->cdev, &pcieportal_fops);
+                        if (cdev_add(&this_board->portal[dn].extra->cdev, this_device_number, 1)) {
                                 printk(KERN_ERR "%s: cdev_add %x failed\n",
                                        DEV_NAME, this_device_number);
                                 err = -EFAULT;
@@ -427,7 +462,7 @@ static int board_activate(int activate, tBoard *this_board, struct pci_dev *dev)
                 printk(KERN_INFO "%s: /dev/%s_%d = %x removed\n",
                        DEV_NAME, DEV_NAME, this_board->info.board_number * NUM_PORTALS + dn, this_device_number); 
                 /* remove device */
-                cdev_del(&this_board->portal[dn].cdev);
+                cdev_del(&this_board->portal[dn].extra->cdev);
         }
         pci_clear_master(dev); /* disable PCI bus master */
         /* set MSIX Entry 0 Vector Control value to 1 (masked) */
@@ -461,7 +496,7 @@ err_exit:
 static int __init pcieportal_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
         tBoard *this_board = NULL;
-        int board_number = 0;
+        int i, board_number = 0;
 
 printk("******[%s:%d] probe %p dev %p id %p getdrv %p\n", __FUNCTION__, __LINE__, &pcieportal_probe, dev, id, pci_get_drvdata(dev));
         printk(KERN_INFO "%s: PCI probe for 0x%04x 0x%04x\n", DEV_NAME, dev->vendor, dev->device); 
@@ -480,6 +515,8 @@ printk("******[%s:%d] probe %p dev %p id %p getdrv %p\n", __FUNCTION__, __LINE__
         this_board = &board_map[board_number];
         printk(KERN_INFO "%s: board_number = %d\n", DEV_NAME, board_number);
         memset(this_board, 0, sizeof(tBoard));
+        for (i = 0; i < NUM_PORTALS; i++)
+                this_board->portal[i].extra = &extra_portal_info[board_number * NUM_PORTALS + i];
         this_board->info.board_number = board_number;
         return board_activate(1, this_board, dev);
 }
@@ -510,6 +547,17 @@ static struct pci_driver pcieportal_ops = {
 };
 
 /*
+ *
+ * get the tBoard struct 
+ *
+ */
+  
+tBoard* get_pcie_portal_descriptor(void)
+{
+  return &board_map[0];
+}
+
+/*
  * driver initialization and exit
  *
  * these routines are responsible for allocating and
@@ -523,6 +571,7 @@ static int __init pcieportal_init(void)
 {
         int status;
 
+printk("[%s:%d]\n", __FUNCTION__, __LINE__);
         pcieportal_class = class_create(THIS_MODULE, "Bluespec");
         if (IS_ERR(pcieportal_class)) {
                 printk(KERN_ERR "%s: failed to create class Bluespec\n", DEV_NAME);
@@ -548,6 +597,7 @@ static int __init pcieportal_init(void)
         printk(KERN_INFO "%s: Major = %d  Minors = %d to %d\n", DEV_NAME,
                MAJOR(device_number), MINOR(device_number),
                MINOR(device_number) + NUM_BOARDS * NUM_BOARDS - 1);
+printk("[%s:%d]\n", __FUNCTION__, __LINE__);
         return 0;                /* success */
 }
 
@@ -563,12 +613,15 @@ static void __exit pcieportal_exit(void)
         printk(KERN_INFO "%s: Unregistered Bluespec Pcieportal driver %s\n", DEV_NAME, DEV_VERSION);
 }
 
+
 /*
  * driver module data for the kernel
  */
 
 module_init(pcieportal_init);
 module_exit(pcieportal_exit);
+
+EXPORT_SYMBOL(get_pcie_portal_descriptor);
 
 MODULE_AUTHOR("Bluespec, Inc., Cambridge hackers");
 MODULE_DESCRIPTION("PCIe device driver for PCIe FPGA portals");

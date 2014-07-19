@@ -25,16 +25,18 @@ import FIFOF::*;
 import GetPut::*;
 import FIFO::*;
 import Connectable::*;
+import ClientServer::*;
 
 import PortalMemory::*;
-import Dma::*;
+import MemTypes::*;
 import BlueScope::*;
 import MemreadEngine::*;
 import MemwriteEngine::*;
+import Pipe::*;
 
 
 interface MemcpyRequest;
-   method Action startCopy(Bit#(32) wrPointer, Bit#(32) rdPointer, Bit#(32) numWords, Bit#(32) burstLen, Bit#(32) iterCnt);
+   method Action startCopy(Bit#(32) wrPointer, Bit#(32) rdPointer, Bit#(32) numWords, Bit#(32) burstLen);
 endinterface
 
 interface MemcpyIndication;
@@ -42,57 +44,57 @@ interface MemcpyIndication;
    method Action done();
 endinterface
 
-module mkMemcpyRequest#(MemcpyIndication indication,
-			ObjectReadServer#(64) dma_read_server,
-			ObjectWriteServer#(64) dma_write_server,
-			BlueScope#(64) bs)(MemcpyRequest);
-   
-   let readFifo <- mkFIFOF;
-   let writeFifo <- mkFIFOF;
+interface Memcpy;
+   interface MemcpyRequest request;
+   interface ObjectReadClient#(64) readClient;
+   interface ObjectWriteClient#(64) writeClient;
+endinterface
 
-   MemreadEngine#(64) re <- mkMemreadEngine(1, readFifo);
-   MemwriteEngine#(64) we <- mkMemwriteEngine(1, writeFifo);
+module mkMemcpyRequest#(MemcpyIndication indication,
+			BlueScope#(64) bs)(Memcpy);
+   
+   MemreadEngine#(64,1)  re <- mkMemreadEngine;
+   MemwriteEngine#(64,1) we <- mkMemwriteEngine;
 
    Reg#(Bit#(32))          iterCnt <- mkReg(0);
    Reg#(Bit#(32))         numWords <- mkReg(0);
    Reg#(ObjectPointer)      rdPointer <- mkReg(0);
    Reg#(ObjectPointer)      wrPointer <- mkReg(0);
    Reg#(Bit#(32))         burstLen <- mkReg(0);
-   
-   mkConnection(re.dmaClient,dma_read_server);
-   mkConnection(we.dmaClient,dma_write_server);
-   
+      
    rule start(iterCnt > 0);
-      re.start(rdPointer, 0, numWords*4, burstLen*4);
-      we.start(wrPointer, 0, numWords*4, burstLen*4);
+      re.readServers[0].request.put(MemengineCmd{pointer:rdPointer, base:0, len:numWords*4, burstLen:truncate(burstLen*4)});
+      we.writeServers[0].request.put(MemengineCmd{pointer:wrPointer, base:0, len:numWords*4, burstLen:truncate(burstLen*4)});
       iterCnt <= iterCnt-1;
    endrule
 
    rule finish;
-      let rv0 <- re.finish;
-      let rv1 <- we.finish;
+      let rv0 <- re.readServers[0].response.get;
+      let rv1 <- we.writeServers[0].response.get;
       if(iterCnt==0) begin
 	 indication.done;
       end
    endrule
    
    rule xfer;
-      //$display("xfer: %h", readFifo.first);
-      readFifo.deq;
-      writeFifo.enq(readFifo.first);
-      bs.dataIn(readFifo.first,readFifo.first);
+      let v <- toGet(re.dataPipes[0]).get;
+      we.dataPipes[0].enq(v);
+      bs.dataIn(v,v);
    endrule
    
-   method Action startCopy(Bit#(32) wp, Bit#(32) rp, Bit#(32) nw, Bit#(32) bl, Bit#(32) ic);
-      $display("startCopy wrPointer=%d rdPointer=%d numWords=%h burstLen=%d iterCnt=%d", wp, rp, nw, bl, ic);
-      indication.started;
-      // initialized
-      wrPointer <= wp;
-      rdPointer <= rp;
-      numWords  <= nw;
-      iterCnt   <= ic;
-      burstLen  <= bl;
-   endmethod
-
+   interface MemcpyRequest request;
+      method Action startCopy(Bit#(32) wp, Bit#(32) rp, Bit#(32) nw, Bit#(32) bl);
+	 $display("startCopy wrPointer=%d rdPointer=%d numWords=%h burstLen=%d", wp, rp, nw, bl);
+	 indication.started;
+	 // initialized
+	 wrPointer <= wp;
+	 rdPointer <= rp;
+	 numWords  <= nw;
+	 iterCnt   <= 1;
+	 burstLen  <= bl;
+      endmethod
+   endinterface
+   interface readClient = re.dmaClient;
+   interface writeClient = we.dmaClient;
 endmodule
 

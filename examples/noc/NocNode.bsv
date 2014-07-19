@@ -20,213 +20,139 @@
 // SOFTWARE.
 
 import Connectable::*;
-import FIFO::*;
+import SerialFIFO::*;
+import FIFOF::*;
 import Vector::*;
-
-/* This is a serial to parallel converter for messages of type a
- * The data register is assumed to always be available, so an arriving
- * message must be removed ASAP or be overwritten 
- */
-interface LinkIn#(type a);
-   method Action frame(bit f);
-   method Action data(bit d);
-   interface FIFO#(?) new;
-   interface ReadOnly#(a) r;
-endinterface
-
-interface LinkOut;
-   method bit frame();
-   method bit data();
-endinterface
-
-
-
-
+import Pipe::*;
+import Arbiter::*;
 
 typedef struct {
-	Bit#(4) address;
-	Bit#(64) payload;
-	} DataMessage deriving(Bits);
+   Bit#(4) address;
+   Bit#(32) payload;
+   } DataMessage deriving(Bits);
 
-typedef struct {
-	Bit#(4) lsn;
-	Bit#(12) busy;
-	} FlowMessage deriving(Bits);
-
-
-
-interface NocNode;
-   interface NocNodeIn in;
-   interface NocNodeOut inrev;
-   interface NocNodeOut out;
-   interface NocNodeIn outrev;
-endinterface
-
-interface SpiReg#(type a);
-   interface NocNode tap;
-   interface FIFO#(a) send;
-   interface FIFO#(a) recv;
-endinterface
+      
+function Action move(PipeOut#(DataMessage) from, PipeIn#(DataMessage) to);
+   return action
+	     $display("move %x", from.first);
+	     to.enq(from.first);
+	     from.deq();
+	  endaction;
+endfunction
 
 
-
-instance Connectable#(NocNodeOut, NocNodeIn);
-   module mkConnection#(NocNodeOut out, NocNodeIn in)(Empty);
-      rule move_data;
-	 in.frame(out.frame());
-	 in.data(out.data());
-	 endrule
-   endmodule
-endinstance
-
-module mkNocNode#(Bit#(4) id)(NocNode#(a))
-   provisos(Bits#(a,asize)),
-            Log#(asize, k);
-
-
-
-
-
-   NocLink east <- mkNocLink();
-   NocLink west <- mkNocLink();
-   NocHost host <- mkNocHost();
-
-
-
+module mkNocArbitrate#(Bit#(4) id, String name, Vector#(n, PipeOut#(a)) in, PipeIn#(a) out)(Empty);
+   Arbiter_IFC#(n) arb <- mkArbiter(False);   
+   for (Integer i = 0; i < valueOf(n); i = i + 1)
+      rule send_request (out.notFull && in[i].notEmpty);
+	 arb.clients[i].request();
+      endrule
+   
+   rule move;
+      if (out.notFull && in[arb.grant_id].notEmpty)
+	 action
+	    $display("%s id %d from %d", name, id, arb.grant_id);
+	    out.enq(in[arb.grant_id].first());
+	    in[arb.grant_id].deq();
+	 endaction
+   endrule
 endmodule
-/* numlinks controls how many fifos to other links there are */
 
-module mkLinkIn(
+module mkNocNode#(Bit#(4) id, 
+		  SerialFIFO#(DataMessage) west,
+		  SerialFIFO#(DataMessage) east)(SerialFIFO#(DataMessage));
 
-module mkLinkIn(LinkIn#(a))
-       provisos(Bits#(a,asize)),
-	        Log#(asize, k);
+   // host Links
+   FIFOF#(DataMessage) fifofromhost <- mkSizedFIFOF(4);
+   FIFOF#(DataMessage) fifotohost <- mkSizedFIFOF(4);
+   SerialFIFO#(DataMessage) host = SerialFIFO{in: toPipeIn(fifotohost),
+				    out: toPipeOut(fifofromhost)}; 
+  
+   // buffers for crossbar switch
+   
+   FIFOF#(DataMessage) he <- mkSizedFIFOF(4);
+   FIFOF#(DataMessage) hw <- mkSizedFIFOF(4);
+   FIFOF#(DataMessage) hh <- mkSizedFIFOF(4);
+   
+   FIFOF#(DataMessage) ew <- mkSizedFIFOF(4);
+   FIFOF#(DataMessage) we <- mkSizedFIFOF(4);
 
-   // registers for receiving data messages
-   Reg#(bit) framebit <- mkReg(0);
-   Reg#(bit) databit <- mkReg(0);
-   Reg#(Bit#(6)) incount <= mkReg(0);
-   Reg#(a) shifter <- mkReg(0);
-   Reg#(a) data <- mkReg(0);
+   FIFOF#(DataMessage) eh <- mkSizedFIFOF(4);
+   FIFOF#(DataMessage) wh <- mkSizedFIFOF(4);
 
-
-   rule handleDataFrame;
-      if (datainframebit == 0)
+   // collate for inputs to host, east, west
+   Vector#(3,PipeOut#(DataMessage)) vToHost = newVector;
+   Vector#(2,PipeOut#(DataMessage)) vToEast = newVector;
+   Vector#(2,PipeOut#(DataMessage)) vToWest = newVector;
+   
+   vToHost[0] = toPipeOut(hh);
+   vToHost[1] = toPipeOut(eh);
+   vToHost[2] = toPipeOut(wh);
+   
+   vToEast[0] = toPipeOut(he);
+   vToEast[1] = toPipeOut(we);
+   
+   vToWest[0] = toPipeOut(hw);
+   vToWest[1] = toPipeOut(ew);
+   
+   mkNocArbitrate(id, "toHost", vToHost, host.in);
+   mkNocArbitrate(id, "toEast", vToEast, east.in);
+   mkNocArbitrate(id, "toWest", vToWest, west.in);
+   
+   // sort host messages to proper queue
+   
+   rule fromhost (host.out.notEmpty);
+      if (host.out.first.address < id)
 	 begin
-            dataincount <= 0;
+	    $display("id %d host to west", id);
+	    move(host.out, toPipeIn(hw));
+	 end
+      else if (host.out.first.address == id)
+	 begin
+	    $display("id %d host to host", id);
+	    move(host.out, toPipeIn(hh));
 	 end
       else
-	 dataincount <= dataincount + 1;
+	 begin
+	    $display("id %d host to east", id);
+	    move(host.out, toPipeIn(he));
+	 end
    endrule
    
-   rule handleDataInShift (datainframebit == 1);
-      Bit#(SizeOf(DataMessage)) tmp = datainshifter;
-      tmp = tmp >> 1;
-      tmp[SizeOf(DataMessage)-1] = datainbit;
-      datainshifter <= tmp;
-      if (dataincount == (SizeOf(DataMessage) - 1))
-         begin
-	 let msg
-	 end;
+   // Handle arriving messages from East
+   
+   rule fromeast (east.out.notEmpty);
+      if (east.out.first.address == id)
+	 begin
+	    $display("fromeast %d to host v %x", id, east.out.first);
+	    move(east.out, toPipeIn(eh));
+	 end
+      else
+	 begin
+	    $display("fromeast %d to west v %x", id, east.out.first);
+	    move(east.out, toPipeIn(ew));
+	 end
    endrule
    
-   interface LinkIn;
-   
-   		method Action frame(bit i );
-	    frameinbit <= i ;
-	 endmethod
-   
-	 method Action data( bit i );
-	    datainbit <= i;
-	 endmethod
+   // Handle arriving messages from West
 
-	       endinterface
-
-
-
-
-
-   // registers for sending flow control messages
-   Wire#(bit) fcoutwire <- mkDWire(0);
-
-   // registers for sending data messages
-   Wire#(bit) dataoutwire <- mkDWire(0);
-
-   // registers for receiving flow control messages
-   Reg#(bit) fcinbit <- mkReg(0);
-   Reg#(bit) fcinframeinbit <- mkReg(0);
-   Reg#(Bit#(6)) fcincount <= mkReg(0);
-   Reg#(FlowMessage) fcinshifter <- mkReg(0);
-   Reg#(FlowMessage) fcindata <- mkReg(0);
-
-   // buffers for incoming messages
-
-   FIFOF#(DataMessage) bufinhost <- mkSizedFIFOF(4);
-   Vector#(numlinks, FIFOF#(DataMessage)) bufinlink = newVector; 
-
-   for (Integer i = 0; i < numlinks; i = i + 1) 
-   begin
-     bufinlink[i] = mkSizedFIFOF#(4);
-   end
-   // XXX how to decode address?  Source routing? Node id?
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-   interface NocNode tap;
-   
-      interface NocNodeIn in;
-   
-	 method Action frame(bit i );
-	    frameinbit <= i ;
-	 endmethod
-   
-	 method Action data( bit i );
-	    datainbit <= i;
-	 endmethod
-
-      endinterface
-   
-      interface NocNodeOut out;
+   rule fromwest (west.out.notEmpty);
+      if (west.out.first.address == id)
+	 begin
+	    $display("fromwest %d to host v %x", id, west.out.first);
+	    move(west.out, toPipeIn(wh));
+	 end
+      else
+	 begin
+	    $display("fromwest %d  to east v %x", id, west.out.first);
+	    move(west.out, toPipeIn(we));
+	 end
+      endrule
       
-	 method bit frame();
-	    return frameinbit;
-	 endmethod
-      
-	 method bit data();
-	    return dataoutwire;
-	 endmethod
-   
-      endinterface
-   
-   endinterface
+  // interface wiring
 
-   interface Reg r;
-
-      method Action _write(a v);
-	 data <= pack(v);
-      endmethod
-   
-      method a _read();
-	 return(unpack(data));
-      endmethod
-
-   endinterface
+   interface PipeIn in = toPipeIn(fifofromhost);
+   interface PipeOut out = toPipeOut(fifotohost);
 
 endmodule
 

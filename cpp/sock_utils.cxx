@@ -29,62 +29,25 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <pthread.h>
 
 #include "sock_utils.h"
 
-void* init_socket(void* _xx)
+void connect_socket(channel *c, const char *format, int id)
 {
-
-  struct channel *c = (struct channel *)_xx;
-
-  //fprintf(stderr, "%s (%s)\n",__FUNCTION__,c->path);
-  if ((c->s1 = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
-    fprintf(stderr, "%s (%s) socket error %s",__FUNCTION__, c->path, strerror(errno));
-    exit(1);
-  }
-
-  c->local.sun_family = AF_UNIX;
-  strcpy(c->local.sun_path, c->path);
-  unlink(c->local.sun_path);
-  int len = strlen(c->local.sun_path) + sizeof(c->local.sun_family);
-  if (bind(c->s1, (struct sockaddr *)&c->local, len) == -1) {
-    fprintf(stderr, "%s (%s) bind error %s\n",__FUNCTION__, c->path, strerror(errno));
-    exit(1);
-  }
-  
-  if (listen(c->s1, 5) == -1) {
-    fprintf(stderr, "%s (%s) listen error %s\n",__FUNCTION__, c->path, strerror(errno));
-    exit(1);
-  }
-  
-  //fprintf(stderr, "%s (%s) waiting for a connection...\n",__FUNCTION__, c->path);
-  if ((c->s2 = accept(c->s1, NULL, NULL)) == -1) {
-    fprintf(stderr, "%s (%s) accept error %s\n",__FUNCTION__, c->path, strerror(errno));
-    exit(1);
-  }
-  
-  //fprintf(stderr, "%s (%s) connected\n",__FUNCTION__,c->path);
-  c->connected = true;
-  return _xx;
-}
-
-
-void connect_socket(channel *c)
-{
-  int len;
   int connect_attempts = 0;
 
-  if ((c->s2 = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+  snprintf(c->path, sizeof(c->path), format, id);
+  if ((c->sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
     fprintf(stderr, "%s (%s) socket error %s\n",__FUNCTION__, c->path, strerror(errno));
     exit(1);
   }
 
   //fprintf(stderr, "%s (%s) trying to connect...\n",__FUNCTION__, c->path);
-  
-  c->local.sun_family = AF_UNIX;
-  strcpy(c->local.sun_path, c->path);
-  len = strlen(c->local.sun_path) + sizeof(c->local.sun_family);
-  while (connect(c->s2, (struct sockaddr *)&(c->local), len) == -1) {
+  struct sockaddr_un local;
+  local.sun_family = AF_UNIX;
+  strcpy(local.sun_path, c->path);
+  while (connect(c->sockfd, (struct sockaddr *)&local, strlen(local.sun_path) + sizeof(local.sun_family)) == -1) {
     if(connect_attempts++ > 16){
       fprintf(stderr,"%s (%s) connect error %s\n",__FUNCTION__, c->path, strerror(errno));
       exit(1);
@@ -92,10 +55,101 @@ void connect_socket(channel *c)
     //fprintf(stderr, "%s (%s) retrying connection\n",__FUNCTION__, c->path);
     sleep(1);
   }
-  // int sockbuffsz = sizeof(memrequest);
-  // setsockopt(c->s2, SOL_SOCKET, SO_SNDBUF, &sockbuffsz, sizeof(sockbuffsz));
-  // sockbuffsz = sizeof(unsigned int);
-  // setsockopt(c->s2, SOL_SOCKET, SO_RCVBUF, &sockbuffsz, sizeof(sockbuffsz));
   fprintf(stderr, "%s (%s) connected\n",__FUNCTION__, c->path);
 }
 
+static void* init_socket(void *_xx)
+{
+  struct channel *c = (struct channel *)_xx;
+  int listening_socket;
+  //fprintf(stderr, "%s (%s)\n",__FUNCTION__,c->path);
+  if ((listening_socket = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+    fprintf(stderr, "%s (%s) socket error %s",__FUNCTION__, c->path, strerror(errno));
+    exit(1);
+  }
+
+  struct sockaddr_un local;
+  local.sun_family = AF_UNIX;
+  strcpy(local.sun_path, c->path);
+  unlink(local.sun_path);
+  int len = strlen(local.sun_path) + sizeof(local.sun_family);
+  if (bind(listening_socket, (struct sockaddr *)&local, len) == -1) {
+    fprintf(stderr, "%s (%s) bind error %s\n",__FUNCTION__, c->path, strerror(errno));
+    exit(1);
+  }
+  
+  if (listen(listening_socket, 5) == -1) {
+    fprintf(stderr, "%s (%s) listen error %s\n",__FUNCTION__, c->path, strerror(errno));
+    exit(1);
+  }
+  
+  //fprintf(stderr, "%s (%s) waiting for a connection...\n",__FUNCTION__, c->path);
+  if ((c->sockfd = accept(listening_socket, NULL, NULL)) == -1) {
+    fprintf(stderr, "%s (%s) accept error %s\n",__FUNCTION__, c->path, strerror(errno));
+    exit(1);
+  }
+  return NULL;
+}
+
+void thread_socket(struct channel* rc, const char *format, int id)
+{
+   pthread_t tid;
+   snprintf(rc->path, sizeof(rc->path), format, id);
+
+   if(pthread_create(&tid, NULL, init_socket, (void*)rc)){
+      fprintf(stderr, "error creating init thread\n");
+      exit(1);
+   }
+}
+
+/* Thanks to keithp.com for readable examples how to do this! */
+
+#define COMMON_SOCK_FD \
+    ssize_t     size; \
+    struct msghdr   msg; \
+    struct iovec    iov; \
+    union { \
+        struct cmsghdr  cmsghdr; \
+        char        control[CMSG_SPACE(sizeof (int))]; \
+    } cmsgu; \
+    struct cmsghdr  *cmsg; \
+    \
+    iov.iov_base = buf; \
+    iov.iov_len = sizeof(buf); \
+    msg.msg_name = NULL; \
+    msg.msg_namelen = 0; \
+    msg.msg_iov = &iov; \
+    msg.msg_iovlen = 1; \
+    msg.msg_control = cmsgu.control; \
+    msg.msg_controllen = sizeof(cmsgu.control);
+
+ssize_t sock_fd_write(int sock, int fd)
+{
+    char buf[] = "1";
+    COMMON_SOCK_FD;
+    cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_len = CMSG_LEN(sizeof (int));
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    *((int *) CMSG_DATA(cmsg)) = fd;
+    return sendmsg(sock, &msg, 0);
+}
+
+ssize_t
+sock_fd_read(int sock, int *fd)
+{
+    char buf[16];
+
+    COMMON_SOCK_FD;
+    *fd = -1;
+    size = recvmsg (sock, &msg, 0);
+    cmsg = CMSG_FIRSTHDR(&msg);
+    if (size > 0 && cmsg && cmsg->cmsg_len == CMSG_LEN(sizeof(int))) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
+            fprintf(stderr, "%s: invalid message\n", __FUNCTION__);
+            exit(1);
+        }
+        *fd = *((int *) CMSG_DATA(cmsg));
+    }
+    return size;
+}
